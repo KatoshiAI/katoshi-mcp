@@ -1,0 +1,16 @@
+node_modules/
+dist/
+.env
+.env.local
+*.log
+.DS_Store
+.aws-sam/
+samconfig.toml
+
+# Compiled TypeScript files (should only be in dist/)
+*.js
+*.d.ts
+*.js.map
+*.d.ts.map
+!scripts/*.sh
+

@@ -1,0 +1,25 @@
+{
+  "name": "katoshi-mcp-server",
+  "version": "1.0.0",
+  "description": "MCP Server for AWS Lambda with API Gateway",
+  "main": "dist/index.js",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx watch src/index.ts",
+    "package": "npm run build && ./scripts/build_lambda_function.sh",
+    "package:layer": "./scripts/build_lambda_layer.sh",
+    "test": "node --test dist/**/*.test.js"
+  },
+  "keywords": ["mcp", "aws", "lambda", "api-gateway"],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {},
+  "devDependencies": {
+    "@types/aws-lambda": "^8.10.145",
+    "@types/node": "^20.14.0",
+    "tsx": "^4.16.0",
+    "typescript": "^5.5.0"
+  }
+}
+
