@@ -14,6 +14,16 @@ function extractBearerToken(headers: Record<string, string>): string | null {
 }
 
 /**
+ * Extract API key from query parameters
+ */
+function extractApiKeyFromQuery(queryStringParameters: Record<string, string> | null): string | null {
+  if (!queryStringParameters) {
+    return null;
+  }
+  return queryStringParameters["api_key"] || queryStringParameters["apiKey"] || null;
+}
+
+/**
  * Validate API key by calling the auth service
  */
 async function validateApiKey(apiKey: string, userId?: string): Promise<boolean> {
@@ -166,7 +176,10 @@ export async function handler(
       }
 
       // Authentication check for MCP requests
-      const token = extractBearerToken(normalized.headers);
+      // Try bearer token first, then fall back to query parameter
+      const bearerToken = extractBearerToken(normalized.headers);
+      const queryApiKey = extractApiKeyFromQuery(queryStringParameters);
+      const token = bearerToken || queryApiKey;
       
       if (!token) {
         // Preserve the request id if it exists and is valid
@@ -187,7 +200,7 @@ export async function handler(
             id: requestId,
             error: {
               code: -32001,
-              message: "Unauthorized - Missing Authorization bearer token",
+              message: "Unauthorized - Missing API key. Provide via Authorization bearer token or api_key query parameter",
             },
           }),
         };
