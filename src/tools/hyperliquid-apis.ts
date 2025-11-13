@@ -10,7 +10,10 @@ import type { Tool } from "../mcp-server.js";
  * POST https://api.hyperliquid.xyz/info
  * Note: If the book is empty, the last trade price will be used as a fallback
  */
-async function getAllMids(args: Record<string, unknown>): Promise<string> {
+async function getAllMids(
+  args: Record<string, unknown>,
+  context?: { apiKey?: string; userId?: string }
+): Promise<string> {
   const dex = (args.dex as string) || "";
 
   try {

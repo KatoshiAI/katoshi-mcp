@@ -16,7 +16,7 @@ function extractBearerToken(headers: Record<string, string>): string | null {
 /**
  * Validate API key by calling the auth service
  */
-async function validateApiKey(apiKey: string): Promise<boolean> {
+async function validateApiKey(apiKey: string, userId?: string): Promise<boolean> {
   const authUrl = process.env.AUTH_URL;
   
   if (!authUrl) {
@@ -25,12 +25,17 @@ async function validateApiKey(apiKey: string): Promise<boolean> {
   }
 
   try {
+    const body: Record<string, string> = { api_key: apiKey };
+    if (userId) {
+      body.user_id = userId;
+    }
+
     const response = await fetch(authUrl, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ api_key: apiKey }),
+      body: JSON.stringify(body),
     });
 
     return response.ok;
@@ -58,6 +63,7 @@ function normalizeEvent(event: any): {
   path: string;
   body: string | null;
   headers: Record<string, string>;
+  queryStringParameters: Record<string, string> | null;
 } {
   // Lambda Function URL format (version 2.0)
   if (event.requestContext && event.requestContext.http) {
@@ -68,6 +74,7 @@ function normalizeEvent(event: any): {
         ? Buffer.from(event.body || "", "base64").toString("utf-8")
         : event.body || null,
       headers: event.headers || {},
+      queryStringParameters: event.queryStringParameters || null,
     };
   }
 
@@ -77,6 +84,7 @@ function normalizeEvent(event: any): {
     path: event.path || "/",
     body: event.body || null,
     headers: event.headers || {},
+    queryStringParameters: event.queryStringParameters || null,
   };
 }
 
@@ -98,7 +106,10 @@ export async function handler(
 
   try {
     const normalized = normalizeEvent(event);
-    const { method, path, body } = normalized;
+    const { method, path, body, queryStringParameters } = normalized;
+    
+    // Extract user_id from query parameters
+    const userId = queryStringParameters?.id || null;
 
     // Handle CORS preflight
     if (method === "OPTIONS") {
@@ -130,51 +141,13 @@ export async function handler(
 
     // Handle MCP protocol messages (POST requests with JSON-RPC)
     if (method === "POST") {
-      // Authentication check for MCP requests
-      const token = extractBearerToken(normalized.headers);
-      
-      if (!token) {
-        return {
-          statusCode: 401,
-          headers: {
-            "Content-Type": "application/json",
-            ...corsHeaders,
-          },
-          body: JSON.stringify({
-            jsonrpc: "2.0",
-            id: null,
-            error: {
-              code: -32001,
-              message: "Unauthorized - Missing Authorization bearer token",
-            },
-          }),
-        };
-      }
-
-      // Validate the API key
-      const isValid = await validateApiKey(token);
-      if (!isValid) {
-        return {
-          statusCode: 401,
-          headers: {
-            "Content-Type": "application/json",
-            ...corsHeaders,
-          },
-          body: JSON.stringify({
-            jsonrpc: "2.0",
-            id: null,
-            error: {
-              code: -32001,
-              message: "Unauthorized - Invalid API key",
-            },
-          }),
-        };
-      }
-      
+      // Parse body first to extract request id for error responses
       let parsedBody: any;
       try {
         parsedBody = body ? JSON.parse(body) : {};
       } catch (parseError) {
+        // For parse errors, we can't extract the id, so we return null
+        // This is acceptable per JSON-RPC 2.0 spec for parse errors
         return {
           statusCode: 400,
           headers: {
@@ -192,8 +165,70 @@ export async function handler(
         };
       }
 
+      // Authentication check for MCP requests
+      const token = extractBearerToken(normalized.headers);
+      
+      if (!token) {
+        // Preserve the request id if it exists and is valid
+        const requestId = parsedBody?.id !== undefined && 
+                         parsedBody?.id !== null && 
+                         (typeof parsedBody.id === 'string' || typeof parsedBody.id === 'number')
+          ? parsedBody.id 
+          : null;
+        
+        return {
+          statusCode: 401,
+          headers: {
+            "Content-Type": "application/json",
+            ...corsHeaders,
+          },
+          body: JSON.stringify({
+            jsonrpc: "2.0",
+            id: requestId,
+            error: {
+              code: -32001,
+              message: "Unauthorized - Missing Authorization bearer token",
+            },
+          }),
+        };
+      }
+
+      // Validate the API key
+      const isValid = await validateApiKey(token, userId || undefined);
+      if (!isValid) {
+        // Preserve the request id if it exists and is valid
+        const requestId = parsedBody?.id !== undefined && 
+                         parsedBody?.id !== null && 
+                         (typeof parsedBody.id === 'string' || typeof parsedBody.id === 'number')
+          ? parsedBody.id 
+          : null;
+        
+        return {
+          statusCode: 401,
+          headers: {
+            "Content-Type": "application/json",
+            ...corsHeaders,
+          },
+          body: JSON.stringify({
+            jsonrpc: "2.0",
+            id: requestId,
+            error: {
+              code: -32001,
+              message: "Unauthorized - Invalid API key",
+            },
+          }),
+        };
+      }
+
       // Validate JSON-RPC 2.0 format
       if (!parsedBody.jsonrpc || parsedBody.jsonrpc !== "2.0") {
+        // Preserve the request id if it exists and is valid
+        const requestId = parsedBody?.id !== undefined && 
+                         parsedBody?.id !== null && 
+                         (typeof parsedBody.id === 'string' || typeof parsedBody.id === 'number')
+          ? parsedBody.id 
+          : null;
+        
         return {
           statusCode: 400,
           headers: {
@@ -202,7 +237,7 @@ export async function handler(
           },
           body: JSON.stringify({
             jsonrpc: "2.0",
-            id: parsedBody.id || null,
+            id: requestId,
             error: {
               code: -32600,
               message: "Invalid Request - must be JSON-RPC 2.0",
@@ -211,12 +246,24 @@ export async function handler(
         };
       }
 
+      // Extract and validate the request id
+      // JSON-RPC 2.0 requires id to be string, number, or null (for notifications)
+      const requestId = parsedBody.id !== undefined && 
+                       parsedBody.id !== null && 
+                       (typeof parsedBody.id === 'string' || typeof parsedBody.id === 'number')
+        ? parsedBody.id 
+        : null;
+
       // Handle the MCP request
       const response = await server.handleRequest({
         jsonrpc: parsedBody.jsonrpc,
-        id: parsedBody.id || null,
+        id: requestId,
         method: parsedBody.method,
         params: parsedBody.params,
+        context: {
+          apiKey: token,
+          userId: userId || undefined,
+        },
       });
 
       return {
@@ -243,6 +290,22 @@ export async function handler(
     };
   } catch (error) {
     console.error("Lambda handler error:", error);
+    // Try to extract request id from event if possible
+    let requestId: string | number | null = null;
+    try {
+      const normalized = normalizeEvent(event);
+      if (normalized.body) {
+        const parsedBody = JSON.parse(normalized.body);
+        if (parsedBody?.id !== undefined && 
+            parsedBody?.id !== null && 
+            (typeof parsedBody.id === 'string' || typeof parsedBody.id === 'number')) {
+          requestId = parsedBody.id;
+        }
+      }
+    } catch {
+      // If we can't parse, use null
+    }
+    
     return {
       statusCode: 500,
       headers: {
@@ -251,7 +314,7 @@ export async function handler(
       },
       body: JSON.stringify({
         jsonrpc: "2.0",
-        id: null,
+        id: requestId,
         error: {
           code: -32603,
           message: error instanceof Error ? error.message : "Internal server error",

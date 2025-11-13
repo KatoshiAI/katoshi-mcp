@@ -9,7 +9,7 @@ export interface Tool {
     properties?: Record<string, any>;
     required?: string[];
   };
-  handler: (args: Record<string, unknown>) => Promise<string>;
+  handler: (args: Record<string, unknown>, context?: { apiKey?: string; userId?: string }) => Promise<string>;
 }
 
 /**
@@ -39,8 +39,30 @@ export class MCPServer {
     id: string | number | null;
     method: string;
     params?: any;
+    context?: { apiKey?: string; userId?: string };
   }): Promise<any> {
     const { method, params, id } = request;
+
+    // Ensure id is valid (string, number, or null for notifications)
+    // JSON-RPC 2.0 requires id to be preserved in responses
+    // For methods that require responses (like initialize), id should always be present
+    const responseId = (id !== null && id !== undefined && 
+                        (typeof id === 'string' || typeof id === 'number')) 
+      ? id 
+      : null;
+
+    // Methods that require a response must have a valid id
+    const methodsRequiringResponse = ['initialize', 'tools/list', 'tools/call'];
+    if (methodsRequiringResponse.includes(method) && responseId === null) {
+      return {
+        jsonrpc: "2.0",
+        id: null,
+        error: {
+          code: -32600,
+          message: `Invalid Request: method '${method}' requires a valid id`,
+        },
+      };
+    }
 
     try {
       let result: any;
@@ -83,7 +105,10 @@ export class MCPServer {
             throw new Error(`Tool ${params.name} has no handler`);
           }
 
-          const toolResult = await tool.handler(params.arguments || {});
+          const toolResult = await tool.handler(
+            params.arguments || {},
+            request.context
+          );
           result = {
             content: [
               {
@@ -98,16 +123,19 @@ export class MCPServer {
           throw new Error(`Method ${method} not found`);
       }
 
+      // For successful responses, id must match the request id
+      // If id is null, this is a notification and shouldn't get a response
+      // But we'll still return it to be safe
       return {
         jsonrpc: "2.0",
-        id,
+        id: responseId,
         result,
       };
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
       return {
         jsonrpc: "2.0",
-        id,
+        id: responseId,
         error: {
           code: -32603,
           message: errorMessage,
