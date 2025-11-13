@@ -268,7 +268,85 @@ Content-Type: application/json
 GET https://your-api-gateway-url/health
 ```
 
-### Connecting from AI Agents
+### Connecting from Cursor IDE
+
+Cursor IDE supports connecting to remote MCP servers using the `mcp-remote` package. This allows you to use your deployed MCP server directly in Cursor.
+
+#### Step 1: Create MCP Configuration
+
+Create or edit the MCP configuration file. Cursor looks for MCP configuration in:
+- **Global**: `~/.cursor/mcp.json` (applies to all workspaces)
+- **Workspace**: `.cursor/mcp.json` in your project root (workspace-specific)
+
+#### Step 2: Add Your Server Configuration
+
+Add the following configuration to your `mcp.json` file:
+
+```json
+{
+  "mcpServers": {
+    "katoshi": {
+      "command": "npx",
+      "args": [
+        "mcp-remote",
+        "https://mcp.katoshi.ai?id=USER_ID&api_key=API_KEY"
+      ]
+    }
+  }
+}
+```
+
+**Replace the placeholders:**
+- `USER_ID`: Your user ID
+- `API_KEY`: Your API key
+
+**Note:** The `mcp-remote` package will be automatically installed via `npx` when Cursor connects, so you don't need to install it globally.
+
+#### Step 3: Restart Cursor
+
+After adding the configuration, restart Cursor IDE to load the MCP server connection.
+
+#### Example Configuration File
+
+Copy the example configuration and customize it with your credentials:
+
+```bash
+# For workspace-specific configuration
+mkdir -p .cursor
+cat > .cursor/mcp.json << 'EOF'
+{
+  "mcpServers": {
+    "katoshi": {
+      "command": "npx",
+      "args": [
+        "mcp-remote",
+        "https://mcp.katoshi.ai?id=YOUR_USER_ID&api_key=YOUR_API_KEY"
+      ]
+    }
+  }
+}
+EOF
+
+# Or for global configuration (applies to all workspaces)
+mkdir -p ~/.cursor
+cat > ~/.cursor/mcp.json << 'EOF'
+{
+  "mcpServers": {
+    "katoshi": {
+      "command": "npx",
+      "args": [
+        "mcp-remote",
+        "https://mcp.katoshi.ai?id=YOUR_USER_ID&api_key=YOUR_API_KEY"
+      ]
+    }
+  }
+}
+EOF
+```
+
+Replace `YOUR_USER_ID` and `YOUR_API_KEY` with your actual credentials.
+
+### Connecting from Other AI Agents
 
 Most MCP clients support HTTP transport. Configure your client with:
 
@@ -303,11 +381,48 @@ katoshi-mcp/
 │   ├── build_lambda_function.sh  # Package Lambda function
 │   └── build_lambda_layer.sh     # Build Lambda layer (for dependencies)
 ├── deployments/             # Build output directory
+├── mcp.json.example         # Example Cursor MCP configuration
 ├── package.json
 └── tsconfig.json
 ```
 
 ## Troubleshooting
+
+### MCP Connection Issues in Cursor
+
+If you encounter errors when connecting to the MCP server in Cursor (such as `Cannot find module 'math-intrinsics/abs'`), this is usually due to a Node.js version mismatch. The `mcp-remote` package requires Node.js 22 or higher.
+
+**Solution: Update Node.js Version**
+
+1. Ensure Node.js 22+ is installed and set as default:
+```bash
+# Using nvm (recommended)
+nvm install 22
+nvm use 22
+nvm alias default 22
+
+# Or download from https://nodejs.org/
+```
+
+2. Clear the npx cache to remove cached packages from older Node versions:
+```bash
+rm -rf ~/.npm/_npx
+```
+
+3. Restart Cursor IDE
+
+**Verify Node.js Version**
+
+Check your Node.js version:
+```bash
+node -v  # Should show v22.x.x or higher
+```
+
+If you're using nvm, make sure it's loaded in your shell profile (`.zshrc`, `.bashrc`, etc.):
+```bash
+export NVM_DIR="$HOME/.nvm"
+[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+```
 
 ### Lambda Timeout
 

@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "katoshi": {
+      "command": "npx",
+      "args": [
+        "mcp-remote",
+        "https://mcp.katoshi.ai?id=USER_ID&api_key=API_KEY"
+      ]
+    }
+  }
+}
+
