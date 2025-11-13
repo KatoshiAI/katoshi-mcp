@@ -11,10 +11,14 @@
     "package:layer": "./scripts/build_lambda_layer.sh",
     "test": "node --test dist/**/*.test.js"
   },
-  "keywords": ["mcp", "aws", "lambda", "api-gateway"],
+  "keywords": [
+    "mcp",
+    "aws",
+    "lambda",
+    "api-gateway"
+  ],
   "author": "",
   "license": "MIT",
-  "dependencies": {},
   "devDependencies": {
     "@types/aws-lambda": "^8.10.145",
     "@types/node": "^20.14.0",
@@ -22,4 +26,3 @@
     "typescript": "^5.5.0"
   }
 }
-

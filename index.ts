@@ -1,5 +1,6 @@
 import type { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
 import { MCPServer } from "./src/mcp-server.js";
+import { log } from "./src/utils/logger.js";
 
 // Reuse server instance across Lambda invocations (warm starts)
 let mcpServer: MCPServer | null = null;
@@ -30,7 +31,7 @@ async function validateApiKey(apiKey: string, userId?: string): Promise<boolean>
   const authUrl = process.env.AUTH_URL;
   
   if (!authUrl) {
-    console.error("AUTH_URL environment variable is not set");
+    log("error", "AUTH_URL environment variable is not set");
     return false;
   }
 
@@ -48,9 +49,19 @@ async function validateApiKey(apiKey: string, userId?: string): Promise<boolean>
       body: JSON.stringify(body),
     });
 
+    if (!response.ok) {
+      log("error", "API key validation failed", {
+        userId,
+        statusCode: response.status,
+      });
+    }
+
     return response.ok;
   } catch (error) {
-    console.error("Error validating API key:", error);
+    log("error", "Error validating API key", {
+      userId,
+      error: error instanceof Error ? error.message : String(error),
+    });
     return false;
   }
 }
@@ -121,6 +132,12 @@ export async function handler(
     // Extract user_id from query parameters
     const userId = queryStringParameters?.id || null;
 
+    log("info", "Request received", {
+      method,
+      path,
+      userId,
+    });
+
     // Handle CORS preflight
     if (method === "OPTIONS") {
       return {
@@ -189,6 +206,11 @@ export async function handler(
           ? parsedBody.id 
           : null;
         
+        log("error", "Missing API key", {
+          method: parsedBody?.method,
+          userId,
+        });
+        
         return {
           statusCode: 401,
           headers: {
@@ -215,6 +237,11 @@ export async function handler(
                          (typeof parsedBody.id === 'string' || typeof parsedBody.id === 'number')
           ? parsedBody.id 
           : null;
+        
+        log("error", "Invalid API key", {
+          method: parsedBody?.method,
+          userId,
+        });
         
         return {
           statusCode: 401,
@@ -268,6 +295,12 @@ export async function handler(
         : null;
 
       // Handle the MCP request
+      log("info", "Processing MCP request", {
+        method: parsedBody.method,
+        userId,
+        requestId,
+      });
+
       const response = await server.handleRequest({
         jsonrpc: parsedBody.jsonrpc,
         id: requestId,
@@ -277,6 +310,13 @@ export async function handler(
           apiKey: token,
           userId: userId || undefined,
         },
+      });
+
+      log("info", "MCP request completed", {
+        method: parsedBody.method,
+        userId,
+        requestId,
+        hasError: !!response.error,
       });
 
       return {
@@ -302,7 +342,6 @@ export async function handler(
       }),
     };
   } catch (error) {
-    console.error("Lambda handler error:", error);
     // Try to extract request id from event if possible
     let requestId: string | number | null = null;
     try {
@@ -318,6 +357,12 @@ export async function handler(
     } catch {
       // If we can't parse, use null
     }
+
+    log("error", "Lambda handler error", {
+      error: error instanceof Error ? error.message : String(error),
+      errorStack: error instanceof Error ? error.stack : undefined,
+      requestId,
+    });
     
     return {
       statusCode: 500,
