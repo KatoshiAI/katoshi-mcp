@@ -6,12 +6,20 @@ import { log } from "./src/utils/logger.js";
 let mcpServer: MCPServer | null = null;
 
 /**
- * Extract bearer token from Authorization header
+ * Extract API key/token from headers (Bearer or X-Api-Key / Api-Key).
+ * Bearer is tried first; then X-Api-Key and Api-Key (case-insensitive).
  */
-function extractBearerToken(headers: Record<string, string>): string | null {
+function extractTokenFromHeaders(headers: Record<string, string>): string | null {
   const authHeader = headers["authorization"] || headers["Authorization"] || "";
-  const match = authHeader.match(/^Bearer\s+(.+)$/i);
-  return match ? match[1] : null;
+  const bearerMatch = authHeader.match(/^Bearer\s+(.+)$/i);
+  if (bearerMatch) return bearerMatch[1];
+
+  const apiKey =
+    headers["x-api-key"] ||
+    headers["X-Api-Key"] ||
+    headers["api-key"] ||
+    headers["Api-Key"];
+  return apiKey || null;
 }
 
 /**
@@ -80,7 +88,7 @@ export async function handler(
   const corsHeaders = {
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type, Authorization",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Api-Key, Api-Key",
   };
 
   try {
@@ -151,10 +159,10 @@ export async function handler(
       }
 
       // Authentication check for MCP requests
-      // Try bearer token first, then fall back to query parameter
-      const bearerToken = extractBearerToken(normalized.headers);
+      // Try headers first (Bearer, then X-Api-Key/Api-Key), then query parameter
+      const headerToken = extractTokenFromHeaders(normalized.headers);
       const queryApiKey = extractApiKeyFromQuery(queryStringParameters);
-      const token = bearerToken || queryApiKey;
+      const token = headerToken || queryApiKey;
       
       if (!token) {
         // Preserve the request id if it exists and is valid
@@ -180,7 +188,7 @@ export async function handler(
             id: requestId,
             error: {
               code: -32001,
-              message: "Unauthorized - Missing API key. Provide via Authorization bearer token or api_key query parameter",
+              message: "Unauthorized - Missing API key. Provide via Authorization: Bearer <key>, X-Api-Key header, or api_key query parameter",
             },
           }),
         };
