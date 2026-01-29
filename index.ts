@@ -25,48 +25,6 @@ function extractApiKeyFromQuery(queryStringParameters: Record<string, string> | 
 }
 
 /**
- * Validate API key by calling the auth service
- */
-async function validateApiKey(apiKey: string, userId?: string): Promise<boolean> {
-  const authUrl = process.env.AUTH_URL;
-  
-  if (!authUrl) {
-    log("error", "AUTH_URL environment variable is not set");
-    return false;
-  }
-
-  try {
-    const body: Record<string, string> = { api_key: apiKey };
-    if (userId) {
-      body.user_id = userId;
-    }
-
-    const response = await fetch(authUrl, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(body),
-    });
-
-    if (!response.ok) {
-      log("error", "API key validation failed", {
-        userId,
-        statusCode: response.status,
-      });
-    }
-
-    return response.ok;
-  } catch (error) {
-    log("error", "Error validating API key", {
-      userId,
-      error: error instanceof Error ? error.message : String(error),
-    });
-    return false;
-  }
-}
-
-/**
  * Initialize MCP server (reused across Lambda invocations for better performance)
  */
 function getMCPServer(): MCPServer {
@@ -228,37 +186,8 @@ export async function handler(
         };
       }
 
-      // Validate the API key
-      const isValid = await validateApiKey(token, userId || undefined);
-      if (!isValid) {
-        // Preserve the request id if it exists and is valid
-        const requestId = parsedBody?.id !== undefined && 
-                         parsedBody?.id !== null && 
-                         (typeof parsedBody.id === 'string' || typeof parsedBody.id === 'number')
-          ? parsedBody.id 
-          : null;
-        
-        log("error", "Invalid API key", {
-          method: parsedBody?.method,
-          userId,
-        });
-        
-        return {
-          statusCode: 401,
-          headers: {
-            "Content-Type": "application/json",
-            ...corsHeaders,
-          },
-          body: JSON.stringify({
-            jsonrpc: "2.0",
-            id: requestId,
-            error: {
-              code: -32001,
-              message: "Unauthorized - Invalid API key",
-            },
-          }),
-        };
-      }
+      // Token is present; pass through to tools. Backend validates on first tool call
+      // (avoids double validation and extra latency from calling AUTH_URL here).
 
       // Validate JSON-RPC 2.0 format
       if (!parsedBody.jsonrpc || parsedBody.jsonrpc !== "2.0") {
