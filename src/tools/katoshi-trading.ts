@@ -438,47 +438,39 @@ const reduceOnlyProp = {
 const sizeProps = {
   size: {
     type: "number" as const,
-    default: null,
-    description: "Size in contracts (e.g. 0.005). Provide exactly one of size, size_usd, or size_pct. Omit the others.",
+    description: "Size in contracts (e.g. 0.005). IMPORTANT: Provide exactly ONE of size, size_usd, or size_pct - omit the other two entirely from your request.",
   },
   size_usd: {
     type: "number" as const,
-    default: null,
-    description: "Size in USD (e.g. 11). Provide exactly one of size, size_usd, or size_pct. Omit the others.",
+    description: "Size in USD (e.g. 11). IMPORTANT: Provide exactly ONE of size, size_usd, or size_pct - omit the other two entirely from your request.",
   },
   size_pct: {
     type: "number" as const,
-    default: null,
-    description: "Size as fraction (e.g. 0.1 for 10%). Provide exactly one of size, size_usd, or size_pct. Omit the others.",
+    description: "Size as fraction (e.g. 0.1 for 10%). IMPORTANT: Provide exactly ONE of size, size_usd, or size_pct - omit the other two entirely from your request.",
   },
 };
 
 const tpslProps = {
   tp_pct: { 
     type: "number" as const, 
-    default: null,
-    description: "Take-profit as % from entry (e.g., 0.02 for 2%). Perps only. Omit if not needed." 
+    description: "Take-profit as % from entry (e.g., 0.02 for 2%). Perps only. IMPORTANT: If the user did not specify take-profit, you MUST omit this property entirely from your request - do NOT set it to 0 or any value." 
   },
   sl_pct: { 
     type: "number" as const, 
-    default: null,
-    description: "Stop-loss as % from entry (e.g., 0.01 for 1%). Perps only. Omit if not needed." 
+    description: "Stop-loss as % from entry (e.g., 0.01 for 1%). Perps only. IMPORTANT: If the user did not specify stop-loss, you MUST omit this property entirely from your request - do NOT set it to 0 or any value." 
   },
   tp: { 
     type: "number" as const, 
-    default: null,
-    description: "Take-profit as price (e.g., 72500). Perps only. Omit if not needed." 
+    description: "Take-profit as price (e.g., 72500). Perps only. IMPORTANT: If the user did not specify take-profit, you MUST omit this property entirely from your request - do NOT set it to 0 or any value." 
   },
   sl: { 
     type: "number" as const, 
-    default: null,
-    description: "Stop-loss as price (e.g., 62500). Perps only. Omit if not needed." 
+    description: "Stop-loss as price (e.g., 62500). Perps only. IMPORTANT: If the user did not specify stop-loss, you MUST omit this property entirely from your request - do NOT set it to 0 or any value." 
   },
 };
 
 const slippageProp = {
   type: "number" as const,
-  default: null,
   description: "Optional. Max slippage % (e.g. 0.05 for 5%). Omit unless the user specifies slippage.",
 };
 

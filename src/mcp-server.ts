@@ -42,6 +42,12 @@ export class MCPServer {
     params?: any;
     context?: { apiKey?: string; userId?: string };
   }): Promise<any> {
+    // Log the full request for debugging 0-value issue
+    log("info", "Incoming MCP request", {
+      method: request.method,
+      params: JSON.stringify(request.params),
+    });
+
     const { method, params, id } = request;
 
     // Ensure id is valid (string, number, or null for notifications)
@@ -103,6 +109,13 @@ export class MCPServer {
           break;
 
         case "tools/call":
+          // Log the raw params as received
+          log("info", "tools/call raw params", {
+            name: params.name,
+            arguments: params.arguments,
+            argumentsType: typeof params.arguments,
+          });
+
           if (!params || !params.name) {
             throw new Error("Tool name is required");
           }
@@ -117,6 +130,8 @@ export class MCPServer {
           }
 
           const toolArgs = params.arguments ?? {};
+
+          // Log raw arguments for debugging
           log("info", "Tool call", {
             tool: params.name,
             arguments: toolArgs,
