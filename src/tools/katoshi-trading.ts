@@ -65,16 +65,11 @@ async function executeAction(
   }
 
   /** Only add to payload if value is not undefined, null, 0 (number), "" (string), or [] (array). */
-  // TEMPORARILY COMMENTED OUT to debug where 0 values are coming from
-  // function setIfValid(p: Record<string, unknown>, key: string, value: unknown): void {
-  //   if (value === undefined || value === null) return;
-  //   if (typeof value === "number" && value === 0) return;
-  //   if (typeof value === "string" && value === "") return;
-  //   if (Array.isArray(value) && value.length === 0) return;
-  //   p[key] = value;
-  // }
   function setIfValid(p: Record<string, unknown>, key: string, value: unknown): void {
-    // TEMP: Allow all values through to see what the agent is actually sending
+    if (value === undefined || value === null) return;
+    if (typeof value === "number" && value === 0) return;
+    if (typeof value === "string" && value === "") return;
+    if (Array.isArray(value) && value.length === 0) return;
     p[key] = value;
   }
 
@@ -406,7 +401,7 @@ async function modifyTpsl(
   ) {
     throw new Error("modify_tpsl requires at least one of: sl_pct, tp_pct, sl, tp");
   }
-  return executeAction("modify_tp_sl", args, context);
+  return executeAction("modify_tpsl", args, context);
 }
 
 async function cancelTpsl(
@@ -415,7 +410,7 @@ async function cancelTpsl(
 ): Promise<string> {
   if (!args.bot_id) throw new Error("bot_id is required");
   if (!args.coin) throw new Error("coin is required");
-  return executeAction("cancel_tp_sl", args, context);
+  return executeAction("cancel_tpsl", args, context);
 }
 
 // --- Common schema fragments ---
@@ -443,27 +438,47 @@ const reduceOnlyProp = {
 const sizeProps = {
   size: {
     type: "number" as const,
-    description: "Size in contracts (e.g. 0.005). Provide exactly one of size, size_usd, or size_pct.",
+    default: null,
+    description: "Size in contracts (e.g. 0.005). Provide exactly one of size, size_usd, or size_pct. Omit the others.",
   },
   size_usd: {
     type: "number" as const,
-    description: "Size in USD (e.g. 11). Provide exactly one of size, size_usd, or size_pct.",
+    default: null,
+    description: "Size in USD (e.g. 11). Provide exactly one of size, size_usd, or size_pct. Omit the others.",
   },
   size_pct: {
     type: "number" as const,
-    description: "Size as fraction (e.g. 0.1 for 10%). Provide exactly one of size, size_usd, or size_pct.",
+    default: null,
+    description: "Size as fraction (e.g. 0.1 for 10%). Provide exactly one of size, size_usd, or size_pct. Omit the others.",
   },
 };
 
 const tpslProps = {
-  tp_pct: { type: "number" as const, description: "Take-profit as % from entry (e.g., 0.02 for 2%). Perps only." },
-  sl_pct: { type: "number" as const, description: "Stop-loss as % from entry (e.g., 0.01 for 1%). Perps only." },
-  tp: { type: "number" as const, description: "Take-profit as price (e.g., 72500). Perps only." },
-  sl: { type: "number" as const, description: "Stop-loss as price (e.g., 62500). Perps only." },
+  tp_pct: { 
+    type: "number" as const, 
+    default: null,
+    description: "Take-profit as % from entry (e.g., 0.02 for 2%). Perps only. Omit if not needed." 
+  },
+  sl_pct: { 
+    type: "number" as const, 
+    default: null,
+    description: "Stop-loss as % from entry (e.g., 0.01 for 1%). Perps only. Omit if not needed." 
+  },
+  tp: { 
+    type: "number" as const, 
+    default: null,
+    description: "Take-profit as price (e.g., 72500). Perps only. Omit if not needed." 
+  },
+  sl: { 
+    type: "number" as const, 
+    default: null,
+    description: "Stop-loss as price (e.g., 62500). Perps only. Omit if not needed." 
+  },
 };
 
 const slippageProp = {
   type: "number" as const,
+  default: null,
   description: "Optional. Max slippage % (e.g. 0.05 for 5%). Omit unless the user specifies slippage.",
 };
 
@@ -471,7 +486,7 @@ export const katoshiTradingTools: Tool[] = [
   {
     name: "katoshi_open_position",
     description:
-      "Open a new long or short position for a coin at market. You MUST provide exactly one of size, size_usd, or size_pct (e.g. size_usd: 11 for $11 USD). No price parameter—executes at market. Optional: tp_pct, sl_pct (e.g. 0.01 for 1%, 0.05 for 5%).",
+      "Open a new long or short position for a coin at market. You MUST provide exactly one of size, size_usd, or size_pct (e.g. size_usd: 11 for $11 USD). Do NOT provide the other size parameters. Do NOT include tp_pct, tp, sl_pct, or sl if the user did not specify take-profit or stop-loss - omit these parameters entirely (do not set them to 0 or null).",
     inputSchema: {
       type: "object",
       properties: {
