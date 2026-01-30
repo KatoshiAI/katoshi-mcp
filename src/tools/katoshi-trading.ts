@@ -481,6 +481,7 @@ export const katoshiTradingTools: Tool[] = [
       "Open a new long or short position for a coin at market. You MUST provide exactly one of size, size_usd, or size_pct (e.g. size_usd: 11 for $11 USD). Do NOT provide the other size parameters. Do NOT include tp_pct, tp, sl_pct, or sl if the user did not specify take-profit or stop-loss - omit these parameters entirely (do not set them to 0 or null).",
     inputSchema: {
       type: "object",
+      additionalProperties: false,  // Prevent LLM from adding extra properties
       properties: {
         bot_id: botIdProp,
         coin: coinProp,
@@ -498,6 +499,7 @@ export const katoshiTradingTools: Tool[] = [
     description: "Close an existing position (fully or partially). Optionally restrict to long or short via is_buy; if omitted, closes both.",
     inputSchema: {
       type: "object",
+      additionalProperties: false,  // Prevent LLM from adding extra properties
       properties: {
         bot_id: botIdProp,
         coin: coinProp,
@@ -515,6 +517,7 @@ export const katoshiTradingTools: Tool[] = [
     description: "Place a market order (immediate execution at current market price).",
     inputSchema: {
       type: "object",
+      additionalProperties: false,  // Prevent LLM from adding extra properties
       properties: {
         bot_id: botIdProp,
         coin: coinProp,
@@ -533,6 +536,7 @@ export const katoshiTradingTools: Tool[] = [
     description: "Place a limit order at a specific price.",
     inputSchema: {
       type: "object",
+      additionalProperties: false,  // Prevent LLM from adding extra properties
       properties: {
         bot_id: botIdProp,
         coin: coinProp,
@@ -552,6 +556,7 @@ export const katoshiTradingTools: Tool[] = [
     description: "Place a stop market order that triggers a market order when price reaches the trigger level.",
     inputSchema: {
       type: "object",
+      additionalProperties: false,  // Prevent LLM from adding extra properties
       properties: {
         bot_id: botIdProp,
         coin: coinProp,
@@ -571,6 +576,7 @@ export const katoshiTradingTools: Tool[] = [
     description: "Place a scale (DCA) order: multiple limit orders between start_price and end_price.",
     inputSchema: {
       type: "object",
+      additionalProperties: false,  // Prevent LLM from adding extra properties
       properties: {
         bot_id: botIdProp,
         coin: coinProp,
@@ -593,6 +599,7 @@ export const katoshiTradingTools: Tool[] = [
     description: "Place a grid order: automated orders at multiple price levels between price_start and price_end.",
     inputSchema: {
       type: "object",
+      additionalProperties: false,  // Prevent LLM from adding extra properties
       properties: {
         bot_id: botIdProp,
         coin: coinProp,
@@ -613,6 +620,7 @@ export const katoshiTradingTools: Tool[] = [
     description: "Move an existing order to a new price.",
     inputSchema: {
       type: "object",
+      additionalProperties: false,  // Prevent LLM from adding extra properties
       properties: {
         bot_id: botIdProp,
         coin: coinProp,
@@ -628,6 +636,7 @@ export const katoshiTradingTools: Tool[] = [
     description: "Cancel one or more resting orders for a coin. Optionally pass order_ids to cancel specific orders; otherwise cancels all resting orders for the coin.",
     inputSchema: {
       type: "object",
+      additionalProperties: false,  // Prevent LLM from adding extra properties
       properties: {
         bot_id: botIdProp,
         coin: coinProp,
@@ -646,6 +655,7 @@ export const katoshiTradingTools: Tool[] = [
     description: "Close all open positions. Optionally filter by coins, direction (is_buy), size_pct, or dexs.",
     inputSchema: {
       type: "object",
+      additionalProperties: false,  // Prevent LLM from adding extra properties
       properties: {
         bot_id: botIdProp,
         coins: { type: "array" as const, items: { type: "string" as const }, description: "Optional: limit to these coins (e.g. ['BTC','ETH'])." },
@@ -662,6 +672,7 @@ export const katoshiTradingTools: Tool[] = [
     description: "Sell (liquidate) all positions. Optionally filter by coins or size_pct.",
     inputSchema: {
       type: "object",
+      additionalProperties: false,  // Prevent LLM from adding extra properties
       properties: {
         bot_id: botIdProp,
         coins: { type: "array" as const, items: { type: "string" as const }, description: "Optional: limit to these coins." },
@@ -676,6 +687,7 @@ export const katoshiTradingTools: Tool[] = [
     description: "Close all positions and cancel all orders. Optionally filter by coins or dexs.",
     inputSchema: {
       type: "object",
+      additionalProperties: false,  // Prevent LLM from adding extra properties
       properties: {
         bot_id: botIdProp,
         coins: { type: "array" as const, items: { type: "string" as const }, description: "Optional: limit to these coins." },
@@ -690,6 +702,7 @@ export const katoshiTradingTools: Tool[] = [
     description: "Cancel all resting orders. Optionally filter by coins, order_ids, or dexs.",
     inputSchema: {
       type: "object",
+      additionalProperties: false,  // Prevent LLM from adding extra properties
       properties: {
         bot_id: botIdProp,
         coins: { type: "array" as const, items: { type: "string" as const }, description: "Optional: limit to these coins." },
@@ -705,6 +718,7 @@ export const katoshiTradingTools: Tool[] = [
     description: "Set leverage and margin mode (cross or isolated) for a coin.",
     inputSchema: {
       type: "object",
+      additionalProperties: false,  // Prevent LLM from adding extra properties
       properties: {
         bot_id: botIdProp,
         coin: coinProp,
@@ -720,6 +734,7 @@ export const katoshiTradingTools: Tool[] = [
     description: "Add or remove margin for a position.",
     inputSchema: {
       type: "object",
+      additionalProperties: false,  // Prevent LLM from adding extra properties
       properties: {
         bot_id: botIdProp,
         coin: coinProp,
@@ -735,6 +750,7 @@ export const katoshiTradingTools: Tool[] = [
     description: "Start a trading bot.",
     inputSchema: {
       type: "object",
+      additionalProperties: false,  // Prevent LLM from adding extra properties
       properties: { bot_id: botIdProp },
       required: ["bot_id"],
     },
@@ -745,6 +761,7 @@ export const katoshiTradingTools: Tool[] = [
     description: "Stop a trading bot.",
     inputSchema: {
       type: "object",
+      additionalProperties: false,  // Prevent LLM from adding extra properties
       properties: { bot_id: botIdProp },
       required: ["bot_id"],
     },
@@ -755,6 +772,7 @@ export const katoshiTradingTools: Tool[] = [
     description: "Modify take-profit and/or stop-loss levels for a position. Provide at least one of tp_pct, sl_pct, tp, or sl.",
     inputSchema: {
       type: "object",
+      additionalProperties: false,  // Prevent LLM from adding extra properties
       properties: {
         bot_id: botIdProp,
         coin: coinProp,
@@ -769,6 +787,7 @@ export const katoshiTradingTools: Tool[] = [
     description: "Cancel take-profit and/or stop-loss orders for a position. Optionally restrict by type: tpsl (both), tp, or sl.",
     inputSchema: {
       type: "object",
+      additionalProperties: false,  // Prevent LLM from adding extra properties
       properties: {
         bot_id: botIdProp,
         coin: coinProp,

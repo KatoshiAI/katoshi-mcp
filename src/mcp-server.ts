@@ -9,6 +9,7 @@ export interface Tool {
     type: string;
     properties?: Record<string, any>;
     required?: string[];
+    additionalProperties?: boolean;
   };
   handler: (args: Record<string, unknown>, context?: { apiKey?: string; userId?: string }) => Promise<string>;
 }
