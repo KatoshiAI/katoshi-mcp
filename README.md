@@ -169,6 +169,13 @@ In your Railway service → **Variables**, add any env vars your tools need, for
 
 After the first deploy, Railway assigns a public URL (e.g. `https://your-app.up.railway.app`). You can add a custom domain in the service settings.
 
+### 4. Connecting from another Railway service (same project)
+
+When another service in the same Railway project connects to this MCP server, use the **private URL** and **include the port**:
+
+- In the other service’s variables, set e.g. `KATOSHI_MCP_URL=https://katoshi-mcp.railway.internal:PORT` where `PORT` is the port Railway assigns this MCP service (often `8080` or the value of `PORT` in this service). Example: `https://katoshi-mcp.railway.internal:8080/?id=USER_ID`.
+- If you omit the port, the client may connect to the wrong port and fail (connection errors, timeouts, or “No response returned”).
+
 ## API Usage
 
 ### MCP Protocol Endpoints

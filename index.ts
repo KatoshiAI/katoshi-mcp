@@ -1,4 +1,5 @@
 import { createServer, IncomingMessage, ServerResponse } from "node:http";
+import { randomUUID } from "node:crypto";
 import { MCPServer } from "./src/mcp-server.js";
 import { log } from "./src/utils/logger.js";
 
@@ -52,7 +53,6 @@ const CORS_HEADERS: Record<string, string> = {
   "Access-Control-Allow-Methods": "GET, POST, OPTIONS, DELETE",
   "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Api-Key, Api-Key, Mcp-Session-Id, Accept",
   "Access-Control-Expose-Headers": "Mcp-Session-Id",
-  "Connection": "close",
 };
 
 /**
@@ -205,9 +205,18 @@ export async function handleRequest(normalized: NormalizedRequest): Promise<Hand
         hasError: !!response.error,
       });
 
+      // Streamable HTTP: return Mcp-Session-Id on initialize for session-based clients
+      const responseHeaders: Record<string, string> = {
+        "Content-Type": "application/json",
+        ...CORS_HEADERS,
+      };
+      if (parsedBody.method === "initialize" && response.result) {
+        responseHeaders["Mcp-Session-Id"] = randomUUID();
+      }
+
       return {
         statusCode: 200,
-        headers: { "Content-Type": "application/json", ...CORS_HEADERS },
+        headers: responseHeaders,
         body: JSON.stringify(response),
       };
     } catch (error) {
@@ -343,7 +352,7 @@ function serve(req: IncomingMessage, res: ServerResponse): void {
 }
 
 const PORT = Number(process.env.PORT) || 3000;
-const HOST = "0.0.0.0"; // Listen on all interfaces for Railway private network
+const HOST = "::"; // Listen on all interfaces for Railway private network
 
 const server = createServer(serve);
 
