@@ -53,7 +53,7 @@ export class MCPServer {
       : null;
 
     // Methods that require a response must have a valid id
-    const methodsRequiringResponse = ['initialize', 'tools/list', 'tools/call'];
+    const methodsRequiringResponse = ['initialize', 'tools/list', 'tools/call', 'ping'];
     if (methodsRequiringResponse.includes(method) && responseId === null) {
       return {
         jsonrpc: "2.0",
@@ -85,6 +85,11 @@ export class MCPServer {
         case "notifications/initialized":
           // Streamable HTTP: client sends this after initialize; no response body required
           result = undefined;
+          break;
+
+        case "ping":
+          // Keepalive: agno MCP client sends ping; respond with empty result per MCP spec
+          result = {};
           break;
 
         case "tools/list":
