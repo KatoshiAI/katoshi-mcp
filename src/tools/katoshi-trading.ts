@@ -65,11 +65,16 @@ async function executeAction(
   }
 
   /** Only add to payload if value is not undefined, null, 0 (number), "" (string), or [] (array). */
+  // TEMPORARILY COMMENTED OUT to debug where 0 values are coming from
+  // function setIfValid(p: Record<string, unknown>, key: string, value: unknown): void {
+  //   if (value === undefined || value === null) return;
+  //   if (typeof value === "number" && value === 0) return;
+  //   if (typeof value === "string" && value === "") return;
+  //   if (Array.isArray(value) && value.length === 0) return;
+  //   p[key] = value;
+  // }
   function setIfValid(p: Record<string, unknown>, key: string, value: unknown): void {
-    if (value === undefined || value === null) return;
-    if (typeof value === "number" && value === 0) return;
-    if (typeof value === "string" && value === "") return;
-    if (Array.isArray(value) && value.length === 0) return;
+    // TEMP: Allow all values through to see what the agent is actually sending
     p[key] = value;
   }
 
