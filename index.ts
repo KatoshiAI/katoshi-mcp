@@ -70,7 +70,19 @@ export async function handleRequest(normalized: NormalizedRequest): Promise<Hand
     return { statusCode: 200, headers: CORS_HEADERS, body: "" };
   }
 
-  // Health: GET / or GET /health (not /mcp)
+  const isMcpPath = path === "/" || path === "/mcp" || path.startsWith("/mcp/");
+  const wantsSse = (headers["accept"] || "").toLowerCase().includes("text/event-stream");
+
+  // Streamable HTTP: GET with Accept: text/event-stream = client opening SSE stream; return SSE
+  if (method === "GET" && isMcpPath && wantsSse) {
+    return {
+      statusCode: 200,
+      headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", ...CORS_HEADERS },
+      body: ": keepalive\n\n",
+    };
+  }
+
+  // Health: GET /health or GET / (when client doesn't want SSE)
   if (path.includes("/health") || (method === "GET" && !path.includes("/mcp"))) {
     const tools = server.getTools();
     return {
@@ -86,13 +98,19 @@ export async function handleRequest(normalized: NormalizedRequest): Promise<Hand
     };
   }
 
-  // Streamable HTTP: GET on MCP path opens SSE stream; we're stateless so return 200 with minimal SSE
-  const isMcpPath = path === "/" || path === "/mcp" || path.startsWith("/mcp/");
+  // GET / or GET /mcp without Accept: text/event-stream → health (for backwards compat)
   if (method === "GET" && isMcpPath) {
+    const tools = server.getTools();
     return {
       statusCode: 200,
-      headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", ...CORS_HEADERS },
-      body: ": keepalive\n\n",
+      headers: { "Content-Type": "application/json", ...CORS_HEADERS },
+      body: JSON.stringify({
+        status: "ok",
+        service: "katoshi-mcp-server",
+        version: "1.0.0",
+        tools: tools.length,
+        availableTools: tools.map((t) => t.name),
+      }),
     };
   }
 
@@ -257,10 +275,42 @@ function headersToRecord(headers: IncomingMessage["headers"]): Record<string, st
   return out;
 }
 
+const REQUEST_TIMEOUT_MS = 55_000; // Slightly under typical client timeouts so we respond before client cancels
+
 function serve(req: IncomingMessage, res: ServerResponse): void {
   const { pathname, query } = parseUrl(req.url || "/");
   const method = req.method || "GET";
   const headers = headersToRecord(req.headers);
+  const requestStart = Date.now();
+
+  const timeout = setTimeout(() => {
+    if (!res.headersSent) {
+      log("warn", "Request timeout", { method, path: pathname, durationMs: REQUEST_TIMEOUT_MS });
+      res.writeHead(504, { "Content-Type": "application/json", ...CORS_HEADERS });
+      res.end(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: null,
+          error: { code: -32603, message: "Request timeout" },
+        })
+      );
+    }
+  }, REQUEST_TIMEOUT_MS);
+  res.on("finish", () => clearTimeout(timeout));
+  res.on("close", () => clearTimeout(timeout));
+
+  const sendResponse = (result: HandlerResponse) => {
+    if (res.headersSent) return;
+    const durationMs = Date.now() - requestStart;
+    log("info", "Response sent", {
+      method,
+      path: pathname,
+      statusCode: result.statusCode,
+      durationMs,
+    });
+    res.writeHead(result.statusCode, result.headers);
+    res.end(result.body);
+  };
 
   const onBody = (body: string) => {
     const normalized: NormalizedRequest = {
@@ -272,19 +322,25 @@ function serve(req: IncomingMessage, res: ServerResponse): void {
     };
     handleRequest(normalized)
       .then((result) => {
-        res.writeHead(result.statusCode, result.headers);
-        res.end(result.body);
+        sendResponse(result);
       })
       .catch((err) => {
-        log("error", "Server error", { error: err instanceof Error ? err.message : String(err) });
-        res.writeHead(500, { "Content-Type": "application/json", ...CORS_HEADERS });
-        res.end(
-          JSON.stringify({
-            jsonrpc: "2.0",
-            id: null,
-            error: { code: -32603, message: "Internal server error" },
-          })
-        );
+        log("error", "Server error", {
+          method,
+          path: pathname,
+          error: err instanceof Error ? err.message : String(err),
+          durationMs: Date.now() - requestStart,
+        });
+        if (!res.headersSent) {
+          res.writeHead(500, { "Content-Type": "application/json", ...CORS_HEADERS });
+          res.end(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              id: null,
+              error: { code: -32603, message: "Internal server error" },
+            })
+          );
+        }
       });
   };
 
