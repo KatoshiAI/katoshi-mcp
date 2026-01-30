@@ -73,14 +73,6 @@ async function executeAction(
     p[key] = value;
   }
 
-  /** Like setIfValid but allows 0 (number). Use for fields where 0 is valid (e.g. stop-loss). */
-  function setIfValidAllowZero(p: Record<string, unknown>, key: string, value: unknown): void {
-    if (value === undefined || value === null) return;
-    if (typeof value === "string" && value === "") return;
-    if (Array.isArray(value) && value.length === 0) return;
-    p[key] = value;
-  }
-
   const payload: Record<string, unknown> = {
     action,
     api_key: apiKey,
@@ -116,8 +108,8 @@ async function executeAction(
   setIfValid(payload, "price", argsNorm.price);
   setIfValid(payload, "tp_pct", argsNorm.tp_pct);
   setIfValid(payload, "tp", argsNorm.tp);
-  setIfValidAllowZero(payload, "sl_pct", argsNorm.sl_pct);
-  setIfValidAllowZero(payload, "sl", argsNorm.sl);
+  setIfValid(payload, "sl_pct", argsNorm.sl_pct);
+  setIfValid(payload, "sl", argsNorm.sl);
   setIfValid(payload, "slippage_pct", argsNorm.slippage_pct);
   setIfValid(payload, "leverage", argsNorm.leverage);
   setIfValid(payload, "is_cross", argsNorm.is_cross);
@@ -467,7 +459,7 @@ const tpslProps = {
 
 const slippageProp = {
   type: "number" as const,
-  description: "Max slippage % (e.g., 0.05 for 5%). Defaults to 5% if not set.",
+  description: "Optional. Max slippage % (e.g. 0.05 for 5%). Omit unless the user specifies slippage.",
 };
 
 export const katoshiTradingTools: Tool[] = [
