@@ -359,15 +359,15 @@ const reduceOnlyProp = {
 const sizeProps = {
   size: {
     type: "number" as const,
-    description: "Size in contracts (e.g., 0.005). Use one of size, size_usd, or size_pct",
+    description: "Size in contracts (e.g. 0.005). Provide exactly one of size, size_usd, or size_pct.",
   },
   size_usd: {
     type: "number" as const,
-    description: "Size in USD (e.g., 100). Use one of size, size_usd, or size_pct",
+    description: "Size in USD (e.g. 11). Provide exactly one of size, size_usd, or size_pct.",
   },
   size_pct: {
     type: "number" as const,
-    description: "Size as percentage (e.g., 0.1 for 10%). Use one of size, size_usd, or size_pct",
+    description: "Size as fraction (e.g. 0.1 for 10%). Provide exactly one of size, size_usd, or size_pct.",
   },
 };
 
@@ -386,7 +386,7 @@ const slippageProp = {
 export const katoshiTradingTools: Tool[] = [
   {
     name: "katoshi_open_position",
-    description: "Open a new long or short position for a coin.",
+    description: "Open a new long or short position for a coin. Require exactly one of size, size_usd, or size_pct. Optional: tp_pct, sl_pct (take-profit and stop-loss as fractions, e.g. 0.05 for 5%).",
     inputSchema: {
       type: "object",
       properties: {
