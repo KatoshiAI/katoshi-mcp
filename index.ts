@@ -1,13 +1,26 @@
-import type { APIGatewayProxyEvent, APIGatewayProxyResult } from "aws-lambda";
+import { createServer, IncomingMessage, ServerResponse } from "node:http";
 import { MCPServer } from "./src/mcp-server.js";
 import { log } from "./src/utils/logger.js";
 
-// Reuse server instance across Lambda invocations (warm starts)
+// Reuse server instance across requests
 let mcpServer: MCPServer | null = null;
+
+export interface NormalizedRequest {
+  method: string;
+  path: string;
+  body: string | null;
+  headers: Record<string, string>;
+  queryStringParameters: Record<string, string> | null;
+}
+
+export interface HandlerResponse {
+  statusCode: number;
+  headers: Record<string, string>;
+  body: string;
+}
 
 /**
  * Extract API key/token from headers (Bearer or X-Api-Key / Api-Key).
- * Bearer is tried first; then X-Api-Key and Api-Key (case-insensitive).
  */
 function extractTokenFromHeaders(headers: Record<string, string>): string | null {
   const authHeader = headers["authorization"] || headers["Authorization"] || "";
@@ -22,19 +35,11 @@ function extractTokenFromHeaders(headers: Record<string, string>): string | null
   return apiKey || null;
 }
 
-/**
- * Extract API key from query parameters
- */
 function extractApiKeyFromQuery(queryStringParameters: Record<string, string> | null): string | null {
-  if (!queryStringParameters) {
-    return null;
-  }
+  if (!queryStringParameters) return null;
   return queryStringParameters["api_key"] || queryStringParameters["apiKey"] || null;
 }
 
-/**
- * Initialize MCP server (reused across Lambda invocations for better performance)
- */
 function getMCPServer(): MCPServer {
   if (!mcpServer) {
     mcpServer = new MCPServer();
@@ -42,211 +47,119 @@ function getMCPServer(): MCPServer {
   return mcpServer;
 }
 
+const CORS_HEADERS: Record<string, string> = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Api-Key, Api-Key",
+};
+
 /**
- * Normalize event from either API Gateway or Lambda Function URL
+ * Core request handler: takes a normalized HTTP request and returns the response.
+ * Used by both the HTTP server (Railway) and can be reused for tests.
  */
-function normalizeEvent(event: any): {
-  method: string;
-  path: string;
-  body: string | null;
-  headers: Record<string, string>;
-  queryStringParameters: Record<string, string> | null;
-} {
-  // Lambda Function URL format (version 2.0)
-  if (event.requestContext && event.requestContext.http) {
+export async function handleRequest(normalized: NormalizedRequest): Promise<HandlerResponse> {
+  const server = getMCPServer();
+  const { method, path, body, headers, queryStringParameters } = normalized;
+  const userId = queryStringParameters?.id ?? null;
+
+  log("info", "Request received", { method, path, userId });
+
+  if (method === "OPTIONS") {
+    return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+  }
+
+  if (path.includes("/health") || (method === "GET" && !path.includes("/mcp"))) {
+    const tools = server.getTools();
     return {
-      method: event.requestContext.http.method || event.requestContext.httpMethod || "GET",
-      path: event.rawPath || event.path || "/",
-      body: event.isBase64Encoded
-        ? Buffer.from(event.body || "", "base64").toString("utf-8")
-        : event.body || null,
-      headers: event.headers || {},
-      queryStringParameters: event.queryStringParameters || null,
+      statusCode: 200,
+      headers: { "Content-Type": "application/json", ...CORS_HEADERS },
+      body: JSON.stringify({
+        status: "ok",
+        service: "katoshi-mcp-server",
+        version: "1.0.0",
+        tools: tools.length,
+        availableTools: tools.map((t) => t.name),
+      }),
     };
   }
 
-  // API Gateway format
-  return {
-    method: event.httpMethod || "GET",
-    path: event.path || "/",
-    body: event.body || null,
-    headers: event.headers || {},
-    queryStringParameters: event.queryStringParameters || null,
-  };
-}
-
-/**
- * Lambda handler for API Gateway HTTP API and Lambda Function URLs
- * Handles MCP JSON-RPC 2.0 protocol messages over HTTP
- */
-export async function handler(
-  event: APIGatewayProxyEvent | any
-): Promise<APIGatewayProxyResult> {
-  const server = getMCPServer();
-
-  // CORS headers
-  const corsHeaders = {
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Api-Key, Api-Key",
-  };
-
-  try {
-    const normalized = normalizeEvent(event);
-    const { method, path, body, queryStringParameters } = normalized;
-    
-    // Extract user_id from query parameters
-    const userId = queryStringParameters?.id || null;
-
-    log("info", "Request received", {
-      method,
-      path,
-      userId,
-    });
-
-    // Handle CORS preflight
-    if (method === "OPTIONS") {
+  if (method === "POST") {
+    let parsedBody: any;
+    try {
+      parsedBody = body ? JSON.parse(body) : {};
+    } catch {
       return {
-        statusCode: 200,
-        headers: corsHeaders,
-        body: "",
-      };
-    }
-
-    // Health check endpoint (no auth required)
-    if (path.includes("/health") || (method === "GET" && !path.includes("/mcp"))) {
-      const tools = server.getTools();
-      return {
-        statusCode: 200,
-        headers: {
-          "Content-Type": "application/json",
-          ...corsHeaders,
-        },
+        statusCode: 400,
+        headers: { "Content-Type": "application/json", ...CORS_HEADERS },
         body: JSON.stringify({
-          status: "ok",
-          service: "katoshi-mcp-server",
-          version: "1.0.0",
-          tools: tools.length,
-          availableTools: tools.map((t) => t.name),
+          jsonrpc: "2.0",
+          id: null,
+          error: { code: -32700, message: "Parse error" },
         }),
       };
     }
 
-    // Handle MCP protocol messages (POST requests with JSON-RPC)
-    if (method === "POST") {
-      // Parse body first to extract request id for error responses
-      let parsedBody: any;
-      try {
-        parsedBody = body ? JSON.parse(body) : {};
-      } catch (parseError) {
-        // For parse errors, we can't extract the id, so we return null
-        // This is acceptable per JSON-RPC 2.0 spec for parse errors
-        return {
-          statusCode: 400,
-          headers: {
-            "Content-Type": "application/json",
-            ...corsHeaders,
-          },
-          body: JSON.stringify({
-            jsonrpc: "2.0",
-            id: null,
-            error: {
-              code: -32700,
-              message: "Parse error",
-            },
-          }),
-        };
-      }
+    const headerToken = extractTokenFromHeaders(headers);
+    const queryApiKey = extractApiKeyFromQuery(queryStringParameters);
+    const token = headerToken || queryApiKey;
 
-      // Authentication check for MCP requests
-      // Try headers first (Bearer, then X-Api-Key/Api-Key), then query parameter
-      const headerToken = extractTokenFromHeaders(normalized.headers);
-      const queryApiKey = extractApiKeyFromQuery(queryStringParameters);
-      const token = headerToken || queryApiKey;
-      
-      if (!token) {
-        // Preserve the request id if it exists and is valid
-        const requestId = parsedBody?.id !== undefined && 
-                         parsedBody?.id !== null && 
-                         (typeof parsedBody.id === 'string' || typeof parsedBody.id === 'number')
-          ? parsedBody.id 
+    if (!token) {
+      const requestId =
+        parsedBody?.id !== undefined &&
+        parsedBody?.id !== null &&
+        (typeof parsedBody.id === "string" || typeof parsedBody.id === "number")
+          ? parsedBody.id
           : null;
-        
-        log("error", "Missing API key", {
-          method: parsedBody?.method,
-          userId,
-        });
-        
-        return {
-          statusCode: 401,
-          headers: {
-            "Content-Type": "application/json",
-            ...corsHeaders,
+      log("error", "Missing API key", { method: parsedBody?.method, userId });
+      return {
+        statusCode: 401,
+        headers: { "Content-Type": "application/json", ...CORS_HEADERS },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: requestId,
+          error: {
+            code: -32001,
+            message:
+              "Unauthorized - Missing API key. Provide via Authorization: Bearer <key>, X-Api-Key header, or api_key query parameter",
           },
-          body: JSON.stringify({
-            jsonrpc: "2.0",
-            id: requestId,
-            error: {
-              code: -32001,
-              message: "Unauthorized - Missing API key. Provide via Authorization: Bearer <key>, X-Api-Key header, or api_key query parameter",
-            },
-          }),
-        };
-      }
+        }),
+      };
+    }
 
-      // Token is present; pass through to tools. Backend validates on first tool call
-      // (avoids double validation and extra latency from calling AUTH_URL here).
-
-      // Validate JSON-RPC 2.0 format
-      if (!parsedBody.jsonrpc || parsedBody.jsonrpc !== "2.0") {
-        // Preserve the request id if it exists and is valid
-        const requestId = parsedBody?.id !== undefined && 
-                         parsedBody?.id !== null && 
-                         (typeof parsedBody.id === 'string' || typeof parsedBody.id === 'number')
-          ? parsedBody.id 
+    if (!parsedBody.jsonrpc || parsedBody.jsonrpc !== "2.0") {
+      const requestId =
+        parsedBody?.id !== undefined &&
+        parsedBody?.id !== null &&
+        (typeof parsedBody.id === "string" || typeof parsedBody.id === "number")
+          ? parsedBody.id
           : null;
-        
-        return {
-          statusCode: 400,
-          headers: {
-            "Content-Type": "application/json",
-            ...corsHeaders,
-          },
-          body: JSON.stringify({
-            jsonrpc: "2.0",
-            id: requestId,
-            error: {
-              code: -32600,
-              message: "Invalid Request - must be JSON-RPC 2.0",
-            },
-          }),
-        };
-      }
+      return {
+        statusCode: 400,
+        headers: { "Content-Type": "application/json", ...CORS_HEADERS },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: requestId,
+          error: { code: -32600, message: "Invalid Request - must be JSON-RPC 2.0" },
+        }),
+      };
+    }
 
-      // Extract and validate the request id
-      // JSON-RPC 2.0 requires id to be string, number, or null (for notifications)
-      const requestId = parsedBody.id !== undefined && 
-                       parsedBody.id !== null && 
-                       (typeof parsedBody.id === 'string' || typeof parsedBody.id === 'number')
-        ? parsedBody.id 
+    const requestId =
+      parsedBody.id !== undefined &&
+      parsedBody.id !== null &&
+      (typeof parsedBody.id === "string" || typeof parsedBody.id === "number")
+        ? parsedBody.id
         : null;
 
-      // Handle the MCP request
-      log("info", "Processing MCP request", {
-        method: parsedBody.method,
-        userId,
-        requestId,
-      });
+    log("info", "Processing MCP request", { method: parsedBody.method, userId, requestId });
 
+    try {
       const response = await server.handleRequest({
         jsonrpc: parsedBody.jsonrpc,
         id: requestId,
         method: parsedBody.method,
         params: parsedBody.params,
-        context: {
-          apiKey: token,
-          userId: userId || undefined,
-        },
+        context: { apiKey: token, userId: userId || undefined },
       });
 
       log("info", "MCP request completed", {
@@ -258,64 +171,107 @@ export async function handler(
 
       return {
         statusCode: 200,
-        headers: {
-          "Content-Type": "application/json",
-          ...corsHeaders,
-        },
+        headers: { "Content-Type": "application/json", ...CORS_HEADERS },
         body: JSON.stringify(response),
       };
+    } catch (error) {
+      log("error", "MCP request error", {
+        error: error instanceof Error ? error.message : String(error),
+        requestId,
+      });
+      return {
+        statusCode: 500,
+        headers: { "Content-Type": "application/json", ...CORS_HEADERS },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: requestId,
+          error: {
+            code: -32603,
+            message: error instanceof Error ? error.message : "Internal server error",
+          },
+        }),
+      };
     }
+  }
 
-    // 404 for unknown endpoints
-    return {
-      statusCode: 404,
-      headers: {
-        "Content-Type": "application/json",
-        ...corsHeaders,
-      },
-      body: JSON.stringify({
-        error: "Not found",
-        message: "Use POST with JSON-RPC 2.0 format or GET /health for health check",
-      }),
-    };
-  } catch (error) {
-    // Try to extract request id from event if possible
-    let requestId: string | number | null = null;
-    try {
-      const normalized = normalizeEvent(event);
-      if (normalized.body) {
-        const parsedBody = JSON.parse(normalized.body);
-        if (parsedBody?.id !== undefined && 
-            parsedBody?.id !== null && 
-            (typeof parsedBody.id === 'string' || typeof parsedBody.id === 'number')) {
-          requestId = parsedBody.id;
-        }
-      }
-    } catch {
-      // If we can't parse, use null
-    }
+  return {
+    statusCode: 404,
+    headers: { "Content-Type": "application/json", ...CORS_HEADERS },
+    body: JSON.stringify({
+      error: "Not found",
+      message: "Use POST with JSON-RPC 2.0 format or GET /health for health check",
+    }),
+  };
+}
 
-    log("error", "Lambda handler error", {
-      error: error instanceof Error ? error.message : String(error),
-      errorStack: error instanceof Error ? error.stack : undefined,
-      requestId,
-    });
-    
-    return {
-      statusCode: 500,
-      headers: {
-        "Content-Type": "application/json",
-        ...corsHeaders,
-      },
-      body: JSON.stringify({
-        jsonrpc: "2.0",
-        id: requestId,
-        error: {
-          code: -32603,
-          message: error instanceof Error ? error.message : "Internal server error",
-        },
-      }),
+function parseUrl(url: string): { pathname: string; query: Record<string, string> } {
+  const u = new URL(url, "http://localhost");
+  const query: Record<string, string> = {};
+  u.searchParams.forEach((v, k) => {
+    query[k] = v;
+  });
+  return { pathname: u.pathname, query };
+}
+
+function collectBody(req: IncomingMessage): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (chunk) => chunks.push(chunk));
+    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf-8")));
+    req.on("error", reject);
+  });
+}
+
+function headersToRecord(headers: IncomingMessage["headers"]): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(headers)) {
+    if (v !== undefined) out[k] = Array.isArray(v) ? v.join(", ") : String(v);
+  }
+  return out;
+}
+
+function serve(req: IncomingMessage, res: ServerResponse): void {
+  const { pathname, query } = parseUrl(req.url || "/");
+  const method = req.method || "GET";
+  const headers = headersToRecord(req.headers);
+
+  const onBody = (body: string) => {
+    const normalized: NormalizedRequest = {
+      method,
+      path: pathname,
+      body: method === "POST" ? body : null,
+      headers,
+      queryStringParameters: Object.keys(query).length ? query : null,
     };
+    handleRequest(normalized)
+      .then((result) => {
+        res.writeHead(result.statusCode, result.headers);
+        res.end(result.body);
+      })
+      .catch((err) => {
+        log("error", "Server error", { error: err instanceof Error ? err.message : String(err) });
+        res.writeHead(500, { "Content-Type": "application/json", ...CORS_HEADERS });
+        res.end(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: null,
+            error: { code: -32603, message: "Internal server error" },
+          })
+        );
+      });
+  };
+
+  if (method === "POST") {
+    collectBody(req).then(onBody);
+  } else {
+    onBody("");
   }
 }
 
+const PORT = Number(process.env.PORT) || 3000;
+
+const server = createServer(serve);
+
+server.listen(PORT, () => {
+  log("info", "Katoshi MCP server listening", { port: PORT });
+});

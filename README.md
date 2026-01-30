@@ -1,19 +1,18 @@
 # Katoshi MCP Server
 
-A Model Context Protocol (MCP) server that transforms your existing APIs into MCP tools, deployable on AWS Lambda with API Gateway.
+A Model Context Protocol (MCP) server that transforms your existing APIs into MCP tools, deployable on [Railway](https://railway.app).
 
 ## Overview
 
 This project provides:
 - **MCP Server Implementation**: Converts your APIs into MCP-compatible tools
-- **AWS Lambda Handler**: Serverless deployment on AWS
-- **API Gateway Integration**: HTTP endpoint for AI agents to connect
+- **HTTP server**: Long-running server (e.g. on Railway) with JSON-RPC 2.0 over HTTP
 - **Easy Tool Registration**: Simple pattern to add new API tools
 
 ## Architecture
 
 ```
-AI Agent → API Gateway → Lambda Function → MCP Server → Your APIs
+AI Agent → Railway (HTTP) → MCP Server → Your APIs
 ```
 
 The MCP server implements the JSON-RPC 2.0 protocol over HTTP, making it compatible with MCP clients and AI agents.
@@ -23,7 +22,6 @@ The MCP server implements the JSON-RPC 2.0 protocol over HTTP, making it compati
 ### Prerequisites
 
 - Node.js 22+ (use `nvm use` to select the correct version)
-- AWS CLI configured
 
 ### Installation
 
@@ -141,101 +139,45 @@ export const apiTools: Tool[] = [
 
 ```bash
 npm run build
-npm run deploy
+# Deploy via Railway (see below) or your own host
 ```
 
-## Deployment to AWS
+## Deployment to Railway
 
-### Manual Deployment (Recommended - No SAM Required)
+Deploy by connecting your GitHub repo to Railway; pushes to your chosen branch will trigger automatic builds and deploys. No deploy scripts are required.
 
-This project includes scripts for manual deployment without requiring AWS SAM.
+### 1. Connect GitHub to Railway
 
-#### Step 1: Build and Package Lambda Function
+1. Sign in at [railway.app](https://railway.app) and create a new project.
+2. Click **Add Service** → **GitHub Repo** and select this repository.
+3. Choose the branch to deploy (e.g. `main`).
+4. Railway will detect Node.js and use:
+   - **Build**: `npm run build`
+   - **Start**: `npm start` (runs `node dist/index.js`)
 
-```bash
-# Build TypeScript and create Lambda package
-npm run package
+The server listens on the `PORT` environment variable that Railway sets automatically.
 
-# This creates: deployments/lambda-function.zip
-```
+### 2. Environment Variables
 
-#### Step 2: Create Lambda Function
+In your Railway service → **Variables**, add any env vars your tools need, for example:
 
-**Option A: Using AWS Console**
-1. Go to AWS Lambda Console
-2. Create Function → Upload from .zip file
-3. Upload `deployments/lambda-function.zip`
-4. Set handler to: `index.handler`
-5. Set runtime to: Node.js 22.x
-6. Set timeout to 30+ seconds
-7. Set memory to 512+ MB
+- `API_KEY` – if your tools call external APIs
+- `API_BASE_URL` – base URL for your APIs
+- Any other keys your `src/tools` use
 
-**Option B: Using AWS CLI**
-```bash
-aws lambda create-function \
-  --function-name katoshi-mcp-server \
-  --runtime nodejs22.x \
-  --role arn:aws:iam::YOUR_ACCOUNT:role/lambda-execution-role \
-  --handler index.handler \
-  --zip-file fileb://deployments/lambda-function.zip \
-  --timeout 30 \
-  --memory-size 512
-```
+### 3. Get Your URL
 
-#### Step 3: Set Up API Gateway
-
-**Option A: Using the Setup Script**
-```bash
-./scripts/setup_api_gateway.sh katoshi-mcp-server
-```
-
-**Option B: Manual Setup via AWS Console**
-1. Go to API Gateway Console
-2. Create API → HTTP API
-3. Add integration → Lambda function → Select your function
-4. Configure routes:
-   - `POST /` - for MCP protocol messages
-   - `GET /health` - for health checks
-   - `OPTIONS /{proxy+}` - for CORS
-5. Deploy to a stage (e.g., `dev`)
-
-#### Step 4: Update Function Code (for updates)
-
-```bash
-# Rebuild and package
-npm run package
-
-# Update function
-aws lambda update-function-code \
-  --function-name katoshi-mcp-server \
-  --zip-file fileb://deployments/lambda-function.zip
-```
-
-### Environment Variables
-
-Set environment variables in the AWS Lambda Console:
-
-1. Go to AWS Lambda Console → Your Function → Configuration → Environment variables
-2. Add variables like:
-   - `API_KEY`: your-api-key
-   - `API_BASE_URL`: https://your-api.com
-
-Or use AWS CLI:
-```bash
-aws lambda update-function-configuration \
-  --function-name katoshi-mcp-server \
-  --environment "Variables={API_KEY=your-key,API_BASE_URL=https://your-api.com}"
-```
-
-For production, use AWS Systems Manager Parameter Store or Secrets Manager and reference them in your Lambda function code.
+After the first deploy, Railway assigns a public URL (e.g. `https://your-app.up.railway.app`). You can add a custom domain in the service settings.
 
 ## API Usage
 
 ### MCP Protocol Endpoints
 
+Replace `https://your-app.up.railway.app` with your Railway (or local) URL.
+
 **List Available Tools:**
 ```bash
-POST https://your-api-gateway-url/
+POST https://your-app.up.railway.app/
 Content-Type: application/json
 
 {
@@ -247,7 +189,7 @@ Content-Type: application/json
 
 **Call a Tool:**
 ```bash
-POST https://your-api-gateway-url/
+POST https://your-app.up.railway.app/
 Content-Type: application/json
 
 {
@@ -265,7 +207,7 @@ Content-Type: application/json
 
 **Health Check:**
 ```bash
-GET https://your-api-gateway-url/health
+GET https://your-app.up.railway.app/health
 ```
 
 ### Connecting from Cursor IDE
@@ -289,7 +231,7 @@ Add the following configuration to your `mcp.json` file:
       "command": "npx",
       "args": [
         "mcp-remote",
-        "https://mcp.katoshi.ai?id=USER_ID&api_key=API_KEY"
+        "https://YOUR_RAILWAY_URL?id=USER_ID&api_key=API_KEY"
       ]
     }
   }
@@ -320,7 +262,7 @@ cat > .cursor/mcp.json << 'EOF'
       "command": "npx",
       "args": [
         "mcp-remote",
-        "https://mcp.katoshi.ai?id=YOUR_USER_ID&api_key=YOUR_API_KEY"
+        "https://YOUR_RAILWAY_URL?id=YOUR_USER_ID&api_key=YOUR_API_KEY"
       ]
     }
   }
@@ -336,7 +278,7 @@ cat > ~/.cursor/mcp.json << 'EOF'
       "command": "npx",
       "args": [
         "mcp-remote",
-        "https://mcp.katoshi.ai?id=YOUR_USER_ID&api_key=YOUR_API_KEY"
+        "https://YOUR_RAILWAY_URL?id=YOUR_USER_ID&api_key=YOUR_API_KEY"
       ]
     }
   }
@@ -350,7 +292,7 @@ Replace `YOUR_USER_ID` and `YOUR_API_KEY` with your actual credentials.
 
 Most MCP clients support HTTP transport. Configure your client with:
 
-- **URL**: Your API Gateway endpoint URL
+- **URL**: Your Railway (or other) endpoint URL
 - **Transport**: HTTP
 - **Protocol**: JSON-RPC 2.0
 
@@ -359,7 +301,7 @@ Example for Claude Desktop (if supported):
 {
   "mcpServers": {
     "katoshi": {
-      "url": "https://your-api-gateway-url/",
+      "url": "https://your-app.up.railway.app/",
       "transport": "http"
     }
   }
@@ -370,17 +312,12 @@ Example for Claude Desktop (if supported):
 
 ```
 katoshi-mcp/
+├── index.ts                 # HTTP server entry (Railway / local)
 ├── src/
-│   ├── index.ts             # AWS Lambda entry point (handler)
 │   ├── mcp-server.ts        # MCP server implementation
 │   └── tools/
 │       ├── index.ts         # Tool registry
-│       ├── example-apis.ts  # Example tools
-│       └── ...              # Your API tools
-├── scripts/
-│   ├── build_lambda_function.sh  # Package Lambda function
-│   └── build_lambda_layer.sh     # Build Lambda layer (for dependencies)
-├── deployments/             # Build output directory
+│       └── ...               # Your API tools
 ├── mcp.json.example         # Example Cursor MCP configuration
 ├── package.json
 └── tsconfig.json
@@ -424,66 +361,31 @@ export NVM_DIR="$HOME/.nvm"
 [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
 ```
 
-### Lambda Timeout
-
-If your API calls take too long, increase the timeout in AWS Lambda Console:
-
-1. Go to AWS Lambda Console → Your Function → Configuration → General configuration
-2. Click Edit → Increase Timeout (e.g., 60 seconds)
-
-Or use AWS CLI:
-```bash
-aws lambda update-function-configuration \
-  --function-name katoshi-mcp-server \
-  --timeout 60
-```
-
 ### CORS Issues
 
-CORS is configured in API Gateway. To restrict origins:
+The server sends permissive CORS headers by default. To restrict origins in production, change `CORS_HEADERS` in `index.ts` (e.g. set `Access-Control-Allow-Origin` to your frontend origin).
 
-1. Go to API Gateway Console → Your API → CORS
-2. Update Allowed Origins to your domain(s)
-3. Redeploy the API
+### Railway Logs
 
-### Debugging
-
-Check CloudWatch Logs:
-```bash
-aws logs tail /aws/lambda/katoshi-mcp-server-mcp-server --follow
-```
-
-## Cost Optimization
-
-- **Lambda**: Pay per request (very cheap for low traffic)
-- **API Gateway**: Pay per million requests
-- **Cold Starts**: First request may be slower (~1-2s), subsequent requests are fast
-
-For high traffic, consider:
-- Provisioned concurrency (reduces cold starts)
-- API Gateway caching
-- CloudFront CDN in front of API Gateway
+In the Railway dashboard, open your service → **Deployments** → select a deployment → **View Logs** to see stdout/stderr.
 
 ## Security
 
-1. **API Keys**: Store in AWS Secrets Manager or Parameter Store
-2. **CORS**: Restrict allowed origins in production
-3. **Rate Limiting**: Add API Gateway throttling
-4. **Authentication**: Add API key or JWT validation in Lambda handler
+1. **API Keys**: Store in Railway Variables (or another secrets manager); never commit keys.
+2. **CORS**: Restrict allowed origins in production (see above).
+3. **Authentication**: MCP requests require an API key via `Authorization: Bearer`, `X-Api-Key`, or `api_key` query param; backend validates on first tool call.
 
 ## Next Steps
 
 - [ ] Replace example APIs with your actual APIs
-- [ ] Add authentication/authorization
-- [ ] Set up CI/CD pipeline
-- [ ] Add monitoring and alerting
-- [ ] Configure custom domain for API Gateway
+- [ ] Add authentication/authorization as needed
+- [ ] Add monitoring and alerting (e.g. Railway metrics or external APM)
+- [ ] Configure custom domain in Railway
 
 ## Resources
 
 - [MCP Specification](https://modelcontextprotocol.io/)
-- [AWS Lambda Best Practices](https://docs.aws.amazon.com/lambda/latest/dg/best-practices.html)
-- [API Gateway HTTP API](https://docs.aws.amazon.com/apigateway/latest/developerguide/http-api.html)
+- [Railway Docs](https://docs.railway.app/)
 
 ## License
 
