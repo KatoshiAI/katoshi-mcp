@@ -34,40 +34,65 @@ async function executeAction(
     throw new Error("api_key is required (should be provided via Authorization bearer token)");
   }
 
+  /** Only add to payload if value is not undefined, null, 0 (number), "" (string), or [] (array). */
+  function setIfValid(p: Record<string, unknown>, key: string, value: unknown): void {
+    if (value === undefined || value === null) return;
+    if (typeof value === "number" && value === 0) return;
+    if (typeof value === "string" && value === "") return;
+    if (Array.isArray(value) && value.length === 0) return;
+    p[key] = value;
+  }
+
+  /** Like setIfValid but allows 0 (number). Use for fields where 0 is valid (e.g. stop-loss). */
+  function setIfValidAllowZero(p: Record<string, unknown>, key: string, value: unknown): void {
+    if (value === undefined || value === null) return;
+    if (typeof value === "string" && value === "") return;
+    if (Array.isArray(value) && value.length === 0) return;
+    p[key] = value;
+  }
+
   const payload: Record<string, unknown> = {
     action,
     api_key: apiKey,
   };
 
-  if (args.bot_id !== undefined) payload.bot_id = args.bot_id;
-  if (args.coin !== undefined) payload.coin = args.coin;
-  if (args.coins !== undefined) payload.coins = args.coins;
-  if (args.is_buy !== undefined) payload.is_buy = args.is_buy;
-  if (args.reduce_only !== undefined) payload.reduce_only = args.reduce_only;
-  if (args.size !== undefined) payload.size = args.size;
-  if (args.size_usd !== undefined) payload.size_usd = args.size_usd;
-  if (args.size_pct !== undefined) payload.size_pct = args.size_pct;
-  if (args.price !== undefined) payload.price = args.price;
-  if (args.tp_pct !== undefined) payload.tp_pct = args.tp_pct;
-  if (args.sl_pct !== undefined) payload.sl_pct = args.sl_pct;
-  if (args.tp !== undefined) payload.tp = args.tp;
-  if (args.sl !== undefined) payload.sl = args.sl;
-  if (args.slippage_pct !== undefined) payload.slippage_pct = args.slippage_pct;
-  if (args.leverage !== undefined) payload.leverage = args.leverage;
-  if (args.is_cross !== undefined) payload.is_cross = args.is_cross;
-  if (args.amount !== undefined) payload.amount = args.amount;
-  if (args.is_add !== undefined) payload.is_add = args.is_add;
-  if (args.order_id !== undefined) payload.order_id = args.order_id;
-  if (args.order_ids !== undefined) payload.order_ids = args.order_ids;
-  if (args.dexs !== undefined) payload.dexs = args.dexs;
-  if (args.type !== undefined) payload.type = args.type;
-  if (args.start_price !== undefined) payload.start_price = args.start_price;
-  if (args.end_price !== undefined) payload.end_price = args.end_price;
-  if (args.num_orders !== undefined) payload.num_orders = args.num_orders;
-  if (args.skew !== undefined) payload.skew = args.skew;
-  if (args.price_start !== undefined) payload.price_start = args.price_start;
-  if (args.price_end !== undefined) payload.price_end = args.price_end;
-  if (args.grids !== undefined) payload.grids = args.grids;
+  setIfValid(payload, "bot_id", args.bot_id);
+  setIfValid(payload, "coin", args.coin);
+  setIfValid(payload, "coins", args.coins);
+  setIfValid(payload, "is_buy", args.is_buy);
+  setIfValid(payload, "reduce_only", args.reduce_only);
+  // Send at most one size parameter; skip empty/0/null
+  const sizeUsd = args.size_usd !== undefined && args.size_usd !== null && Number(args.size_usd) !== 0 ? args.size_usd : undefined;
+  const size = args.size !== undefined && args.size !== null && Number(args.size) !== 0 ? args.size : undefined;
+  const sizePct = args.size_pct !== undefined && args.size_pct !== null && Number(args.size_pct) !== 0 ? args.size_pct : undefined;
+  if (sizeUsd !== undefined) {
+    payload.size_usd = sizeUsd;
+  } else if (size !== undefined) {
+    payload.size = size;
+  } else if (sizePct !== undefined) {
+    payload.size_pct = sizePct;
+  }
+  setIfValid(payload, "price", args.price);
+  setIfValid(payload, "tp_pct", args.tp_pct);
+  setIfValid(payload, "tp", args.tp);
+  setIfValidAllowZero(payload, "sl_pct", args.sl_pct);
+  setIfValidAllowZero(payload, "sl", args.sl);
+  setIfValid(payload, "slippage_pct", args.slippage_pct);
+  setIfValid(payload, "leverage", args.leverage);
+  setIfValid(payload, "is_cross", args.is_cross);
+  setIfValid(payload, "amount", args.amount);
+  setIfValid(payload, "is_add", args.is_add);
+  setIfValid(payload, "order_id", args.order_id);
+  setIfValid(payload, "order_ids", args.order_ids);
+  setIfValid(payload, "dexs", args.dexs);
+  setIfValid(payload, "type", args.type);
+  setIfValid(payload, "start_price", args.start_price);
+  setIfValid(payload, "end_price", args.end_price);
+  setIfValid(payload, "num_orders", args.num_orders);
+  setIfValid(payload, "skew", args.skew);
+  setIfValid(payload, "price_start", args.price_start);
+  setIfValid(payload, "price_end", args.price_end);
+  setIfValid(payload, "grids", args.grids);
 
   const apiUrl = `${KATOSHI_API_BASE_URL}?id=${encodeURIComponent(userId)}`;
 
@@ -386,7 +411,7 @@ const slippageProp = {
 export const katoshiTradingTools: Tool[] = [
   {
     name: "katoshi_open_position",
-    description: "Open a new long or short position for a coin. Require exactly one of size, size_usd, or size_pct. Optional: tp_pct, sl_pct (take-profit and stop-loss as fractions, e.g. 0.05 for 5%).",
+    description: "Open a new long or short position for a coin. Require exactly one of size, size_usd, or size_pct. Optional: tp_pct, sl_pct (e.g. 0.01 for 1%, 0.05 for 5%).",
     inputSchema: {
       type: "object",
       properties: {
