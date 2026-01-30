@@ -268,7 +268,7 @@ function serve(req: IncomingMessage, res: ServerResponse): void {
   }
 }
 
-const PORT = Number(process.env.PORT);
+const PORT = Number(process.env.PORT) || 3000;
 const HOST = "0.0.0.0"; // Listen on all interfaces for Railway private network
 
 const server = createServer(serve);
