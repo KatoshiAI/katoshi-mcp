@@ -1,5 +1,4 @@
 import { createServer, IncomingMessage, ServerResponse } from "node:http";
-import { randomUUID } from "node:crypto";
 import { MCPServer } from "./src/mcp-server.js";
 import { log } from "./src/utils/logger.js";
 
@@ -53,6 +52,7 @@ const CORS_HEADERS: Record<string, string> = {
   "Access-Control-Allow-Methods": "GET, POST, OPTIONS, DELETE",
   "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Api-Key, Api-Key, Mcp-Session-Id, Accept",
   "Access-Control-Expose-Headers": "Mcp-Session-Id",
+  "Connection": "close",
 };
 
 /**
@@ -205,18 +205,9 @@ export async function handleRequest(normalized: NormalizedRequest): Promise<Hand
         hasError: !!response.error,
       });
 
-      // Streamable HTTP: return Mcp-Session-Id on initialize so client can send it on subsequent requests
-      const responseHeaders: Record<string, string> = {
-        "Content-Type": "application/json",
-        ...CORS_HEADERS,
-      };
-      if (parsedBody.method === "initialize" && response.result) {
-        responseHeaders["Mcp-Session-Id"] = randomUUID();
-      }
-
       return {
         statusCode: 200,
-        headers: responseHeaders,
+        headers: { "Content-Type": "application/json", ...CORS_HEADERS },
         body: JSON.stringify(response),
       };
     } catch (error) {
