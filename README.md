@@ -78,7 +78,7 @@ curl -X POST http://localhost:3000 \
 
 ### Step 1: Create a Tool File
 
-Create a new file in `src/tools/` (e.g., `src/tools/user-apis.ts`):
+Create a new file in `src/` (e.g., `src/user-apis.ts`):
 
 ```typescript
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
@@ -124,7 +124,7 @@ export const userApiTools: Tool[] = [
 
 ### Step 2: Register the Tools
 
-Add your tools to `src/tools/index.ts`:
+Add your tools to `src/tools.ts`:
 
 ```typescript
 import { userApiTools } from "./user-apis.js";
@@ -321,10 +321,12 @@ Example for Claude Desktop (if supported):
 katoshi-mcp/
 ├── index.ts                 # HTTP server entry (Railway / local)
 ├── src/
+│   ├── tools.ts             # Tool types + registry (combines all tools)
 │   ├── mcp-server.ts        # MCP server implementation
-│   └── tools/
-│       ├── index.ts         # Tool registry
-│       └── ...               # Your API tools
+│   ├── katoshi-tools.ts     # Katoshi trading tools
+│   ├── hyperliquid-tools.ts # Hyperliquid API tools (optional)
+│   ├── request-context.ts   # Request context (apiKey, userId)
+│   └── utils.ts             # Logging and helpers
 ├── mcp.json.example         # Example Cursor MCP configuration
 ├── package.json
 └── tsconfig.json

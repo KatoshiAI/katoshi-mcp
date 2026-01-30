@@ -1,5 +1,7 @@
-import type { Tool } from "../mcp-server.js";
-import { log } from "../utils/logger.js";
+import * as z from "zod";
+import { getRequestContext } from "./request-context.js";
+import { log } from "./utils.js";
+import { toContent, type SdkToolDefinition } from "./tool-registry.js";
 
 /**
  * Katoshi Trading API tools
@@ -12,6 +14,29 @@ const KATOSHI_API_BASE_URL = process.env.KATOSHI_API_BASE_URL;
 /**
  * Shared helper to execute a trading action via Katoshi Signal API
  */
+/** Coerce to number only when value is a number; otherwise undefined (avoids sending 0/null by mistake). */
+function asNumber(v: unknown): number | undefined {
+  return typeof v === "number" ? v : undefined;
+}
+
+/** Coerce to boolean only when value is a boolean; otherwise undefined (avoids sending 0/null by mistake). */
+function asBoolean(v: unknown): boolean | undefined {
+  return typeof v === "boolean" ? v : undefined;
+}
+
+/** Coerce to string[] only when value is an array of strings; otherwise undefined (avoids sending null/empty by mistake). */
+function asStringArray(v: unknown): string[] | undefined {
+  if (!Array.isArray(v)) return undefined;
+  const out = v.filter((x): x is string => typeof x === "string");
+  return out.length > 0 ? out : undefined;
+}
+
+/** Coerce to enum only when value is one of the allowed strings; otherwise undefined. */
+function asEnum<T extends string>(v: unknown, allowed: readonly T[]): T | undefined {
+  if (typeof v !== "string") return undefined;
+  return allowed.includes(v as T) ? (v as T) : undefined;
+}
+
 /** Normalize args so both snake_case and camelCase from agents are accepted. */
 function normalizeArgs(args: Record<string, unknown>): Record<string, unknown> {
   const normalized = { ...args };
@@ -64,12 +89,11 @@ async function executeAction(
     throw new Error("api_key is required (should be provided via Authorization bearer token)");
   }
 
-  /** Only add to payload if value is not undefined, null, 0 (number), "" (string), or [] (array). */
+  /** Only add to payload when value is defined (for non-number fields). */
   function setIfValid(p: Record<string, unknown>, key: string, value: unknown): void {
-    // if (value === undefined || value === null) return;
-    // if (typeof value === "number" && value === 0) return;
-    // if (typeof value === "string" && value === "") return;
-    // if (Array.isArray(value) && value.length === 0) return;
+    if (value === undefined || value === null) return;
+    if (typeof value === "string" && value === "") return;
+    if (Array.isArray(value) && value.length === 0) return;
     p[key] = value;
   }
 
@@ -86,18 +110,18 @@ async function executeAction(
       : undefined;
   setIfValid(payload, "bot_id", botIdInt);
   setIfValid(payload, "coin", argsNorm.coin);
-  setIfValid(payload, "coins", argsNorm.coins);
-  setIfValid(payload, "is_buy", argsNorm.is_buy);
-  setIfValid(payload, "reduce_only", argsNorm.reduce_only);
-  // Send at most one size parameter; skip empty/0/null; coerce to number so API gets numeric values
-  const rawSizeUsd = argsNorm.size_usd;
-  const rawSize = argsNorm.size;
-  const rawSizePct = argsNorm.size_pct;
-  const sizeUsd =
-    rawSizeUsd !== undefined && rawSizeUsd !== null && Number(rawSizeUsd) !== 0 ? Number(rawSizeUsd) : undefined;
-  const size = rawSize !== undefined && rawSize !== null && Number(rawSize) !== 0 ? Number(rawSize) : undefined;
-  const sizePct =
-    rawSizePct !== undefined && rawSizePct !== null && Number(rawSizePct) !== 0 ? Number(rawSizePct) : undefined;
+  // Optional arrays: only send when actually array of strings (avoids sending null/0)
+  const coins = asStringArray(argsNorm.coins);
+  if (coins !== undefined) payload.coins = coins;
+  // Optional boolean: only send when actually boolean (avoids sending 0)
+  const isBuy = asBoolean(argsNorm.is_buy);
+  if (isBuy !== undefined) payload.is_buy = isBuy;
+  const reduceOnly = asBoolean(argsNorm.reduce_only);
+  if (reduceOnly !== undefined) payload.reduce_only = reduceOnly;
+  // Size: only send when actually a number (avoids sending 0/null)
+  const sizeUsd = asNumber(argsNorm.size_usd);
+  const size = asNumber(argsNorm.size);
+  const sizePct = asNumber(argsNorm.size_pct);
   if (sizeUsd !== undefined) {
     payload.size_usd = sizeUsd;
   } else if (size !== undefined) {
@@ -105,27 +129,48 @@ async function executeAction(
   } else if (sizePct !== undefined) {
     payload.size_pct = sizePct;
   }
-  setIfValid(payload, "price", argsNorm.price);
-  setIfValid(payload, "tp_pct", argsNorm.tp_pct);
-  setIfValid(payload, "tp", argsNorm.tp);
-  setIfValid(payload, "sl_pct", argsNorm.sl_pct);
-  setIfValid(payload, "sl", argsNorm.sl);
-  setIfValid(payload, "slippage_pct", argsNorm.slippage_pct);
-  setIfValid(payload, "leverage", argsNorm.leverage);
-  setIfValid(payload, "is_cross", argsNorm.is_cross);
-  setIfValid(payload, "amount", argsNorm.amount);
-  setIfValid(payload, "is_add", argsNorm.is_add);
+  // Optional number fields: only send when typeof number (never send 0/null by mistake)
+  const price = asNumber(argsNorm.price);
+  if (price !== undefined) payload.price = price;
+  const tpPct = asNumber(argsNorm.tp_pct);
+  if (tpPct !== undefined) payload.tp_pct = tpPct;
+  const tp = asNumber(argsNorm.tp);
+  if (tp !== undefined) payload.tp = tp;
+  const slPct = asNumber(argsNorm.sl_pct);
+  if (slPct !== undefined) payload.sl_pct = slPct;
+  const sl = asNumber(argsNorm.sl);
+  if (sl !== undefined) payload.sl = sl;
+  const slippagePct = asNumber(argsNorm.slippage_pct);
+  if (slippagePct !== undefined) payload.slippage_pct = slippagePct;
+  const leverage = asNumber(argsNorm.leverage);
+  if (leverage !== undefined) payload.leverage = leverage;
+  const isCross = asBoolean(argsNorm.is_cross);
+  if (isCross !== undefined) payload.is_cross = isCross;
+  const amount = asNumber(argsNorm.amount);
+  if (amount !== undefined) payload.amount = amount;
+  const isAdd = asBoolean(argsNorm.is_add);
+  if (isAdd !== undefined) payload.is_add = isAdd;
   setIfValid(payload, "order_id", argsNorm.order_id);
-  setIfValid(payload, "order_ids", argsNorm.order_ids);
-  setIfValid(payload, "dexs", argsNorm.dexs);
-  setIfValid(payload, "type", argsNorm.type);
-  setIfValid(payload, "start_price", argsNorm.start_price);
-  setIfValid(payload, "end_price", argsNorm.end_price);
-  setIfValid(payload, "num_orders", argsNorm.num_orders);
-  setIfValid(payload, "skew", argsNorm.skew);
-  setIfValid(payload, "price_start", argsNorm.price_start);
-  setIfValid(payload, "price_end", argsNorm.price_end);
-  setIfValid(payload, "num_grids", argsNorm.num_grids);
+  const orderIds = asStringArray(argsNorm.order_ids);
+  if (orderIds !== undefined) payload.order_ids = orderIds;
+  const dexs = asStringArray(argsNorm.dexs);
+  if (dexs !== undefined) payload.dexs = dexs;
+  const typeVal = asEnum(argsNorm.type, ["tpsl", "tp", "sl"] as const);
+  if (typeVal !== undefined) payload.type = typeVal;
+  const startPrice = asNumber(argsNorm.start_price);
+  if (startPrice !== undefined) payload.start_price = startPrice;
+  const endPrice = asNumber(argsNorm.end_price);
+  if (endPrice !== undefined) payload.end_price = endPrice;
+  const numOrders = asNumber(argsNorm.num_orders);
+  if (numOrders !== undefined) payload.num_orders = numOrders;
+  const skew = asNumber(argsNorm.skew);
+  if (skew !== undefined) payload.skew = skew;
+  const priceStart = asNumber(argsNorm.price_start);
+  if (priceStart !== undefined) payload.price_start = priceStart;
+  const priceEnd = asNumber(argsNorm.price_end);
+  if (priceEnd !== undefined) payload.price_end = priceEnd;
+  const numGrids = asNumber(argsNorm.num_grids);
+  if (numGrids !== undefined) payload.num_grids = numGrids;
 
   const apiUrl = `${KATOSHI_API_BASE_URL}?id=${encodeURIComponent(userId)}`;
 
@@ -413,400 +458,290 @@ async function cancelTpsl(
   return executeAction("cancel_tpsl", args, context);
 }
 
-// --- Common schema fragments ---
+// --- Zod schema fragments (SDK inputSchema) ---
 
-const botIdProp = {
-  type: ["string", "integer"] as const,
-  description: "The bot ID to execute the action for (number or string, e.g. 640 or '640'). Sent as integer to the API.",
+const botIdSchema = z
+  .union([z.number(), z.string()])
+  .describe("The bot ID to execute the action for (number or string, e.g. 640 or '640'). Sent as integer to the API.");
+const coinSchema = z.string().describe("The coin symbol (e.g., 'BTC', 'ETH', 'SOL')");
+const isBuySchema = z.boolean().describe("Trade direction: true for long/buy, false for short/sell");
+const reduceOnlySchema = z.boolean().describe("If true, only close/reduce. If false, can open or close. Perps only.");
+// Optional number fields: use number | null so LLM can send null for "not specified". Do not send 0.
+const optionalNumber = (description: string) =>
+  z.union([z.number(), z.null()]).optional().describe(description);
+const sizeSchema = optionalNumber("Size in contracts (e.g. 0.005). Provide exactly ONE of size, size_usd, or size_pct. Use null or omit for the other two. Do not send 0.");
+const sizeUsdSchema = optionalNumber("Size in USD (e.g. 11). Provide exactly ONE of size, size_usd, or size_pct. Use null or omit for the other two. Do not send 0.");
+const sizePctSchema = optionalNumber("Size as fraction (e.g. 0.1 for 10%). Provide exactly ONE of size, size_usd, or size_pct. Use null or omit for the other two. Do not send 0.");
+const tpslSchemas = {
+  tp_pct: z.union([z.number(), z.null()]).optional().describe("Take-profit as % from entry (e.g. 0.02 for 2%). Use null or omit if user did not specify. Do not send 0."),
+  sl_pct: z.union([z.number(), z.null()]).optional().describe("Stop-loss as % from entry (e.g. 0.01 for 1%). Use null or omit if user did not specify. Do not send 0."),
+  tp: z.union([z.number(), z.null()]).optional().describe("Take-profit as price. Use null or omit if user did not specify. Do not send 0."),
+  sl: z.union([z.number(), z.null()]).optional().describe("Stop-loss as price. Use null or omit if user did not specify. Do not send 0."),
 };
+const slippagePctSchema = z.union([z.number(), z.null()]).optional().describe("Max slippage % (e.g. 0.05 for 5%). Use null or omit unless user specifies. Do not send 0.");
 
-const coinProp = {
-  type: "string" as const,
-  description: "The coin symbol (e.g., 'BTC', 'ETH', 'SOL')",
-};
+// Optional booleans/arrays/enum: accept null so agents don't send 0 or wrong types.
+const optionalBoolean = (description: string) =>
+  z.union([z.boolean(), z.null()]).optional().describe(description);
+const optionalStringArray = (description: string) =>
+  z.union([z.array(z.string()), z.null()]).optional().describe(description);
+const tpslTypeEnum = z.union([z.enum(["tpsl", "tp", "sl"]), z.null()]).optional().describe("Optional: 'tpsl' = both (default), 'tp' = take-profit only, 'sl' = stop-loss only. Use null or omit for default.");
 
-const isBuyProp = {
-  type: "boolean" as const,
-  description: "Trade direction: true for long/buy, false for short/sell",
-};
-
-const reduceOnlyProp = {
-  type: "boolean" as const,
-  description: "If true, only close/reduce. If false, can open or close. Perps only.",
-};
-
-const sizeProps = {
-  size: {
-    type: "number" as const,
-    exclusiveMinimum: 0,
-    description: "Size in contracts (e.g. 0.005). IMPORTANT: Provide exactly ONE of size, size_usd, or size_pct - omit the other two entirely from your request.",
-  },
-  size_usd: {
-    type: "number" as const,
-    exclusiveMinimum: 0,
-    description: "Size in USD (e.g. 11). IMPORTANT: Provide exactly ONE of size, size_usd, or size_pct - omit the other two entirely from your request.",
-  },
-  size_pct: {
-    type: "number" as const,
-    exclusiveMinimum: 0,
-    description: "Size as fraction (e.g. 0.1 for 10%). IMPORTANT: Provide exactly ONE of size, size_usd, or size_pct - omit the other two entirely from your request.",
-  },
-};
-
-const tpslProps = {
-  tp_pct: { 
-    type: "number" as const, 
-    exclusiveMinimum: 0,
-    description: "Take-profit as % from entry (e.g., 0.02 for 2%). Perps only. IMPORTANT: If the user did not specify take-profit, you MUST omit this property entirely from your request - do NOT set it to 0 or any value." 
-  },
-  sl_pct: { 
-    type: "number" as const, 
-    exclusiveMinimum: 0,
-    description: "Stop-loss as % from entry (e.g., 0.01 for 1%). Perps only. IMPORTANT: If the user did not specify stop-loss, you MUST omit this property entirely from your request - do NOT set it to 0 or any value." 
-  },
-  tp: { 
-    type: "number" as const, 
-    exclusiveMinimum: 0,
-    description: "Take-profit as price (e.g., 72500). Perps only. IMPORTANT: If the user did not specify take-profit, you MUST omit this property entirely from your request - do NOT set it to 0 or any value." 
-  },
-  sl: { 
-    type: "number" as const, 
-    exclusiveMinimum: 0,
-    description: "Stop-loss as price (e.g., 62500). Perps only. IMPORTANT: If the user did not specify stop-loss, you MUST omit this property entirely from your request - do NOT set it to 0 or any value." 
-  },
-};
-
-const slippageProp = {
-  type: "number" as const,
-  exclusiveMinimum: 0,
-  description: "Optional. Max slippage % (e.g. 0.05 for 5%). Omit unless the user specifies slippage.",
-};
-
-export const katoshiTradingTools: Tool[] = [
+export const katoshiTradingTools: SdkToolDefinition[] = [
   {
     name: "katoshi_open_position",
+    title: "Open Position",
     description:
       "Open a new long or short position for a coin at market. You MUST provide exactly one of size, size_usd, or size_pct (e.g. size_usd: 11 for $11 USD). Do NOT provide the other size parameters. Do NOT include tp_pct, tp, sl_pct, or sl if the user did not specify take-profit or stop-loss - omit these parameters entirely (do not set them to 0 or null).",
     inputSchema: {
-      type: "object",
-      additionalProperties: false,  // Prevent LLM from adding extra properties
-      properties: {
-        bot_id: botIdProp,
-        coin: coinProp,
-        is_buy: isBuyProp,
-        ...sizeProps,
-        ...tpslProps,
-        slippage_pct: slippageProp,
-      },
-      required: ["bot_id", "coin", "is_buy"],
+      bot_id: botIdSchema,
+      coin: coinSchema,
+      is_buy: isBuySchema,
+      size: sizeSchema,
+      size_usd: sizeUsdSchema,
+      size_pct: sizePctSchema,
+      ...tpslSchemas,
+      slippage_pct: slippagePctSchema,
     },
-    handler: openPosition,
+    handler: async (args, _extra) => toContent(await openPosition(args, getRequestContext())),
   },
   {
     name: "katoshi_close_position",
+    title: "Close Position",
     description: "Close an existing position (fully or partially). Optionally restrict to long or short via is_buy; if omitted, closes both.",
     inputSchema: {
-      type: "object",
-      additionalProperties: false,  // Prevent LLM from adding extra properties
-      properties: {
-        bot_id: botIdProp,
-        coin: coinProp,
-        is_buy: { type: "boolean" as const, description: "Optional: true = close long, false = close short; omit to close both." },
-        ...sizeProps,
-        ...tpslProps,
-        slippage_pct: slippageProp,
-      },
-      required: ["bot_id", "coin"],
+      bot_id: botIdSchema,
+      coin: coinSchema,
+      is_buy: optionalBoolean("Optional: true = close long, false = short. Use null or omit to close both. Do not send 0."),
+      size: sizeSchema,
+      size_usd: sizeUsdSchema,
+      size_pct: sizePctSchema,
+      ...tpslSchemas,
+      slippage_pct: slippagePctSchema,
     },
-    handler: closePosition,
+    handler: async (args, _extra) => toContent(await closePosition(args, getRequestContext())),
   },
   {
     name: "katoshi_market_order",
+    title: "Market Order",
     description: "Place a market order (immediate execution at current market price).",
     inputSchema: {
-      type: "object",
-      additionalProperties: false,  // Prevent LLM from adding extra properties
-      properties: {
-        bot_id: botIdProp,
-        coin: coinProp,
-        is_buy: isBuyProp,
-        reduce_only: reduceOnlyProp,
-        ...sizeProps,
-        ...tpslProps,
-        slippage_pct: slippageProp,
-      },
-      required: ["bot_id", "coin", "is_buy", "reduce_only"],
+      bot_id: botIdSchema,
+      coin: coinSchema,
+      is_buy: isBuySchema,
+      reduce_only: reduceOnlySchema,
+      size: sizeSchema,
+      size_usd: sizeUsdSchema,
+      size_pct: sizePctSchema,
+      ...tpslSchemas,
+      slippage_pct: slippagePctSchema,
     },
-    handler: marketOrder,
+    handler: async (args, _extra) => toContent(await marketOrder(args, getRequestContext())),
   },
   {
     name: "katoshi_limit_order",
+    title: "Limit Order",
     description: "Place a limit order at a specific price.",
     inputSchema: {
-      type: "object",
-      additionalProperties: false,  // Prevent LLM from adding extra properties
-      properties: {
-        bot_id: botIdProp,
-        coin: coinProp,
-        is_buy: isBuyProp,
-        reduce_only: reduceOnlyProp,
-        ...sizeProps,
-        price: { type: "number" as const, description: "Limit price for the order." },
-        ...tpslProps,
-        slippage_pct: slippageProp,
-      },
-      required: ["bot_id", "coin", "is_buy", "reduce_only", "price"],
+      bot_id: botIdSchema,
+      coin: coinSchema,
+      is_buy: isBuySchema,
+      reduce_only: reduceOnlySchema,
+      price: z.number().describe("Limit price for the order."),
+      size: sizeSchema,
+      size_usd: sizeUsdSchema,
+      size_pct: sizePctSchema,
+      ...tpslSchemas,
+      slippage_pct: slippagePctSchema,
     },
-    handler: limitOrder,
+    handler: async (args, _extra) => toContent(await limitOrder(args, getRequestContext())),
   },
   {
     name: "katoshi_stop_market_order",
+    title: "Stop Market Order",
     description: "Place a stop market order that triggers a market order when price reaches the trigger level.",
     inputSchema: {
-      type: "object",
-      additionalProperties: false,  // Prevent LLM from adding extra properties
-      properties: {
-        bot_id: botIdProp,
-        coin: coinProp,
-        is_buy: isBuyProp,
-        reduce_only: reduceOnlyProp,
-        ...sizeProps,
-        price: { type: "number" as const, description: "Trigger price for the stop." },
-        ...tpslProps,
-        slippage_pct: slippageProp,
-      },
-      required: ["bot_id", "coin", "is_buy", "reduce_only", "price"],
+      bot_id: botIdSchema,
+      coin: coinSchema,
+      is_buy: isBuySchema,
+      reduce_only: reduceOnlySchema,
+      price: z.number().describe("Trigger price for the stop."),
+      size: sizeSchema,
+      size_usd: sizeUsdSchema,
+      size_pct: sizePctSchema,
+      ...tpslSchemas,
+      slippage_pct: slippagePctSchema,
     },
-    handler: stopMarketOrder,
+    handler: async (args, _extra) => toContent(await stopMarketOrder(args, getRequestContext())),
   },
   {
     name: "katoshi_scale_order",
+    title: "Scale Order (DCA)",
     description: "Place a scale (DCA) order: multiple limit orders between start_price and end_price.",
     inputSchema: {
-      type: "object",
-      additionalProperties: false,  // Prevent LLM from adding extra properties
-      properties: {
-        bot_id: botIdProp,
-        coin: coinProp,
-        is_buy: isBuyProp,
-        reduce_only: reduceOnlyProp,
-        ...sizeProps,
-        start_price: { type: "number" as const, description: "Price of first order (closest to current price)." },
-        end_price: { type: "number" as const, description: "Price of last order." },
-        num_orders: { type: "number" as const, description: "Number of limit orders." },
-        skew: { type: "number" as const, description: "Size skew between first and last order (e.g., 2 = last 2x first). Default 1." },
-        ...tpslProps,
-        slippage_pct: slippageProp,
-      },
-      required: ["bot_id", "coin", "is_buy", "reduce_only", "start_price", "end_price", "num_orders"],
+      bot_id: botIdSchema,
+      coin: coinSchema,
+      is_buy: isBuySchema,
+      reduce_only: reduceOnlySchema,
+      start_price: z.number().describe("Price of first order (closest to current price)."),
+      end_price: z.number().describe("Price of last order."),
+      num_orders: z.number().describe("Number of limit orders."),
+      skew: optionalNumber("Size skew between first and last order (e.g. 2 = last 2x first). Use null or omit for default 1. Do not send 0."),
+      size: sizeSchema,
+      size_usd: sizeUsdSchema,
+      size_pct: sizePctSchema,
+      ...tpslSchemas,
+      slippage_pct: slippagePctSchema,
     },
-    handler: scaleOrder,
+    handler: async (args, _extra) => toContent(await scaleOrder(args, getRequestContext())),
   },
   {
     name: "katoshi_grid_order",
+    title: "Grid Order",
     description: "Place a grid order: automated orders at multiple price levels between price_start and price_end.",
     inputSchema: {
-      type: "object",
-      additionalProperties: false,  // Prevent LLM from adding extra properties
-      properties: {
-        bot_id: botIdProp,
-        coin: coinProp,
-        is_buy: isBuyProp,
-        ...sizeProps,
-        price_start: { type: "number" as const, description: "Start of grid price range." },
-        price_end: { type: "number" as const, description: "End of grid price range." },
-        num_grids: { type: "number" as const, description: "Number of grid orders to place." },
-        ...tpslProps,
-        slippage_pct: slippageProp,
-      },
-      required: ["bot_id", "coin", "is_buy", "price_start", "price_end", "num_grids"],
+      bot_id: botIdSchema,
+      coin: coinSchema,
+      is_buy: isBuySchema,
+      price_start: z.number().describe("Start of grid price range."),
+      price_end: z.number().describe("End of grid price range."),
+      num_grids: z.number().describe("Number of grid orders to place."),
+      size: sizeSchema,
+      size_usd: sizeUsdSchema,
+      size_pct: sizePctSchema,
+      ...tpslSchemas,
+      slippage_pct: slippagePctSchema,
     },
-    handler: gridOrder,
+    handler: async (args, _extra) => toContent(await gridOrder(args, getRequestContext())),
   },
   {
     name: "katoshi_move_order",
+    title: "Move Order",
     description: "Move an existing order to a new price.",
     inputSchema: {
-      type: "object",
-      additionalProperties: false,  // Prevent LLM from adding extra properties
-      properties: {
-        bot_id: botIdProp,
-        coin: coinProp,
-        order_id: { type: "string" as const, description: "ID of the order to move." },
-        price: { type: "number" as const, description: "New price for the order." },
-      },
-      required: ["bot_id", "coin", "order_id", "price"],
+      bot_id: botIdSchema,
+      coin: coinSchema,
+      order_id: z.string().describe("ID of the order to move."),
+      price: z.number().describe("New price for the order."),
     },
-    handler: moveOrder,
+    handler: async (args, _extra) => toContent(await moveOrder(args, getRequestContext())),
   },
   {
     name: "katoshi_cancel_order",
+    title: "Cancel Order",
     description: "Cancel one or more resting orders for a coin. Optionally pass order_ids to cancel specific orders; otherwise cancels all resting orders for the coin.",
     inputSchema: {
-      type: "object",
-      additionalProperties: false,  // Prevent LLM from adding extra properties
-      properties: {
-        bot_id: botIdProp,
-        coin: coinProp,
-        order_ids: {
-          type: "array" as const,
-          items: { type: "string" as const },
-          description: "Optional: specific order IDs to cancel. If omitted, all resting orders for the coin are canceled.",
-        },
-      },
-      required: ["bot_id", "coin"],
+      bot_id: botIdSchema,
+      coin: coinSchema,
+      order_ids: optionalStringArray("Optional: specific order IDs to cancel. Use null or omit to cancel all resting orders for the coin. Do not send [] or 0."),
     },
-    handler: cancelOrder,
+    handler: async (args, _extra) => toContent(await cancelOrder(args, getRequestContext())),
   },
   {
     name: "katoshi_close_all",
+    title: "Close All",
     description: "Close all open positions. Optionally filter by coins, direction (is_buy), size_pct, or dexs.",
     inputSchema: {
-      type: "object",
-      additionalProperties: false,  // Prevent LLM from adding extra properties
-      properties: {
-        bot_id: botIdProp,
-        coins: { type: "array" as const, items: { type: "string" as const }, description: "Optional: limit to these coins (e.g. ['BTC','ETH'])." },
-        is_buy: { type: "boolean" as const, description: "Optional: true = long only, false = short only." },
-        size_pct: { type: "number" as const, description: "Optional: close only this % of each position." },
-        dexs: { type: "array" as const, items: { type: "string" as const }, description: "Optional: limit to these DEXs." },
-      },
-      required: ["bot_id"],
+      bot_id: botIdSchema,
+      coins: optionalStringArray("Optional: limit to these coins (e.g. ['BTC','ETH']). Use null or omit for all. Do not send [] or 0."),
+      is_buy: optionalBoolean("Optional: true = long only, false = short only. Use null or omit for both. Do not send 0."),
+      size_pct: optionalNumber("Optional: close only this % of each position. Use null or omit for 100%. Do not send 0."),
+      dexs: optionalStringArray("Optional: limit to these DEXs. Use null or omit for all. Do not send [] or 0."),
     },
-    handler: closeAll,
+    handler: async (args, _extra) => toContent(await closeAll(args, getRequestContext())),
   },
   {
     name: "katoshi_sell_all",
+    title: "Sell All",
     description: "Sell (liquidate) all positions. Optionally filter by coins or size_pct.",
     inputSchema: {
-      type: "object",
-      additionalProperties: false,  // Prevent LLM from adding extra properties
-      properties: {
-        bot_id: botIdProp,
-        coins: { type: "array" as const, items: { type: "string" as const }, description: "Optional: limit to these coins." },
-        size_pct: { type: "number" as const, description: "Optional: sell only this % of each position." },
-      },
-      required: ["bot_id"],
+      bot_id: botIdSchema,
+      coins: optionalStringArray("Optional: limit to these coins. Use null or omit for all. Do not send [] or 0."),
+      size_pct: optionalNumber("Optional: sell only this % of each position. Use null or omit for 100%. Do not send 0."),
     },
-    handler: sellAll,
+    handler: async (args, _extra) => toContent(await sellAll(args, getRequestContext())),
   },
   {
     name: "katoshi_clear_all",
+    title: "Clear All",
     description: "Close all positions and cancel all orders. Optionally filter by coins or dexs.",
     inputSchema: {
-      type: "object",
-      additionalProperties: false,  // Prevent LLM from adding extra properties
-      properties: {
-        bot_id: botIdProp,
-        coins: { type: "array" as const, items: { type: "string" as const }, description: "Optional: limit to these coins." },
-        dexs: { type: "array" as const, items: { type: "string" as const }, description: "Optional: limit to these DEXs." },
-      },
-      required: ["bot_id"],
+      bot_id: botIdSchema,
+      coins: optionalStringArray("Optional: limit to these coins. Use null or omit for all. Do not send [] or 0."),
+      dexs: optionalStringArray("Optional: limit to these DEXs. Use null or omit for all. Do not send [] or 0."),
     },
-    handler: clearAll,
+    handler: async (args, _extra) => toContent(await clearAll(args, getRequestContext())),
   },
   {
     name: "katoshi_cancel_all",
+    title: "Cancel All",
     description: "Cancel all resting orders. Optionally filter by coins, order_ids, or dexs.",
     inputSchema: {
-      type: "object",
-      additionalProperties: false,  // Prevent LLM from adding extra properties
-      properties: {
-        bot_id: botIdProp,
-        coins: { type: "array" as const, items: { type: "string" as const }, description: "Optional: limit to these coins." },
-        order_ids: { type: "array" as const, items: { type: "string" as const }, description: "Optional: cancel only these order IDs." },
-        dexs: { type: "array" as const, items: { type: "string" as const }, description: "Optional: limit to these DEXs." },
-      },
-      required: ["bot_id"],
+      bot_id: botIdSchema,
+      coins: optionalStringArray("Optional: limit to these coins. Use null or omit for all. Do not send [] or 0."),
+      order_ids: optionalStringArray("Optional: cancel only these order IDs. Use null or omit for all. Do not send [] or 0."),
+      dexs: optionalStringArray("Optional: limit to these DEXs. Use null or omit for all. Do not send [] or 0."),
     },
-    handler: cancelAll,
+    handler: async (args, _extra) => toContent(await cancelAll(args, getRequestContext())),
   },
   {
     name: "katoshi_set_leverage",
+    title: "Set Leverage",
     description: "Set leverage and margin mode (cross or isolated) for a coin.",
     inputSchema: {
-      type: "object",
-      additionalProperties: false,  // Prevent LLM from adding extra properties
-      properties: {
-        bot_id: botIdProp,
-        coin: coinProp,
-        leverage: { type: "number" as const, description: "Leverage multiplier (e.g., 5 for 5x)." },
-        is_cross: { type: "boolean" as const, description: "true = Cross margin, false = Isolated margin." },
-      },
-      required: ["bot_id", "coin", "leverage", "is_cross"],
+      bot_id: botIdSchema,
+      coin: coinSchema,
+      leverage: z.number().describe("Leverage multiplier (e.g., 5 for 5x)."),
+      is_cross: z.boolean().describe("true = Cross margin, false = Isolated margin."),
     },
-    handler: setLeverage,
+    handler: async (args, _extra) => toContent(await setLeverage(args, getRequestContext())),
   },
   {
     name: "katoshi_adjust_margin",
+    title: "Adjust Margin",
     description: "Add or remove margin for a position.",
     inputSchema: {
-      type: "object",
-      additionalProperties: false,  // Prevent LLM from adding extra properties
-      properties: {
-        bot_id: botIdProp,
-        coin: coinProp,
-        amount: { type: "number" as const, description: "Amount in USD to add or remove (e.g., 5 for $5)." },
-        is_add: { type: "boolean" as const, description: "true = add margin, false = remove margin." },
-      },
-      required: ["bot_id", "coin", "amount", "is_add"],
+      bot_id: botIdSchema,
+      coin: coinSchema,
+      amount: z.number().describe("Amount in USD to add or remove (e.g., 5 for $5)."),
+      is_add: z.boolean().describe("true = add margin, false = remove margin."),
     },
-    handler: adjustMargin,
+    handler: async (args, _extra) => toContent(await adjustMargin(args, getRequestContext())),
   },
   {
     name: "katoshi_start_bot",
+    title: "Start Bot",
     description: "Start a trading bot.",
-    inputSchema: {
-      type: "object",
-      additionalProperties: false,  // Prevent LLM from adding extra properties
-      properties: { bot_id: botIdProp },
-      required: ["bot_id"],
-    },
-    handler: startBot,
+    inputSchema: { bot_id: botIdSchema },
+    handler: async (args, _extra) => toContent(await startBot(args, getRequestContext())),
   },
   {
     name: "katoshi_stop_bot",
+    title: "Stop Bot",
     description: "Stop a trading bot.",
-    inputSchema: {
-      type: "object",
-      additionalProperties: false,  // Prevent LLM from adding extra properties
-      properties: { bot_id: botIdProp },
-      required: ["bot_id"],
-    },
-    handler: stopBot,
+    inputSchema: { bot_id: botIdSchema },
+    handler: async (args, _extra) => toContent(await stopBot(args, getRequestContext())),
   },
   {
     name: "katoshi_modify_tpsl",
+    title: "Modify TP/SL",
     description: "Modify take-profit and/or stop-loss levels for a position. Provide at least one of tp_pct, sl_pct, tp, or sl.",
     inputSchema: {
-      type: "object",
-      additionalProperties: false,  // Prevent LLM from adding extra properties
-      properties: {
-        bot_id: botIdProp,
-        coin: coinProp,
-        ...tpslProps,
-      },
-      required: ["bot_id", "coin"],
+      bot_id: botIdSchema,
+      coin: coinSchema,
+      ...tpslSchemas,
     },
-    handler: modifyTpsl,
+    handler: async (args, _extra) => toContent(await modifyTpsl(args, getRequestContext())),
   },
   {
     name: "katoshi_cancel_tpsl",
+    title: "Cancel TP/SL",
     description: "Cancel take-profit and/or stop-loss orders for a position. Optionally restrict by type: tpsl (both), tp, or sl.",
     inputSchema: {
-      type: "object",
-      additionalProperties: false,  // Prevent LLM from adding extra properties
-      properties: {
-        bot_id: botIdProp,
-        coin: coinProp,
-        type: {
-          type: "string" as const,
-          enum: ["tpsl", "tp", "sl"],
-          description: "Optional: 'tpsl' = both (default), 'tp' = take-profit only, 'sl' = stop-loss only.",
-        },
-      },
-      required: ["bot_id", "coin"],
+      bot_id: botIdSchema,
+      coin: coinSchema,
+      type: tpslTypeEnum,
     },
-    handler: cancelTpsl,
+    handler: async (args, _extra) => toContent(await cancelTpsl(args, getRequestContext())),
   },
 ];

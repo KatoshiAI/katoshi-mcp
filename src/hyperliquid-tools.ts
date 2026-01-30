@@ -1,11 +1,12 @@
-import type { Tool } from "../mcp-server.js";
+import { getRequestContext } from "./request-context.js";
+import { toContent, type SdkToolDefinition } from "./tool-registry.js";
 // import * as hl from "@nktkas/hyperliquid"; // SDK disabled - uninstalled
 
 /**
  * Hyperliquid API tools
  * Documentation: https://api.hyperliquid.xyz/info
  * SDK: https://github.com/nktkas/hyperliquid
- * 
+ *
  * NOTE: Currently disabled - SDK has been uninstalled
  * To re-enable: install @nktkas/hyperliquid and uncomment the code below
  */
@@ -36,17 +37,13 @@ async function getAllMids(
   throw new Error("Hyperliquid tools are currently disabled");
 }
 
-export const hyperliquidApiTools: Tool[] = [
+export const hyperliquidApiTools: SdkToolDefinition[] = [
   {
     name: "get_all_mids",
+    title: "Get All Mids",
     description:
       "Retrieve mids (mid prices) for all coins from Hyperliquid using the SDK. If the book is empty, the last trade price will be used as a fallback.",
-    inputSchema: {
-      type: "object",
-      properties: {},
-      required: [],
-    },
-    handler: getAllMids,
+    inputSchema: {},
+    handler: async (args, _extra) => toContent(await getAllMids(args, getRequestContext())),
   },
 ];
-
