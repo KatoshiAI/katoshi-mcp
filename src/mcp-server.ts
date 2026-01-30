@@ -70,7 +70,7 @@ export class MCPServer {
       switch (method) {
         case "initialize":
           result = {
-            protocolVersion: "2024-11-05",
+            protocolVersion: "2025-03-26",
             capabilities: {
               tools: {},
             },
@@ -79,6 +79,11 @@ export class MCPServer {
               version: "1.0.0",
             },
           };
+          break;
+
+        case "notifications/initialized":
+          // Streamable HTTP: client sends this after initialize; no response body required
+          result = undefined;
           break;
 
         case "tools/list":
@@ -123,9 +128,11 @@ export class MCPServer {
           throw new Error(`Method ${method} not found`);
       }
 
+      // notifications/initialized has no response body per JSON-RPC 2.0
+      if (method === "notifications/initialized") {
+        return { jsonrpc: "2.0", id: null };
+      }
       // For successful responses, id must match the request id
-      // If id is null, this is a notification and shouldn't get a response
-      // But we'll still return it to be safe
       return {
         jsonrpc: "2.0",
         id: responseId,

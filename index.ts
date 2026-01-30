@@ -1,4 +1,5 @@
 import { createServer, IncomingMessage, ServerResponse } from "node:http";
+import { randomUUID } from "node:crypto";
 import { MCPServer } from "./src/mcp-server.js";
 import { log } from "./src/utils/logger.js";
 
@@ -49,8 +50,9 @@ function getMCPServer(): MCPServer {
 
 const CORS_HEADERS: Record<string, string> = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Api-Key, Api-Key",
+  "Access-Control-Allow-Methods": "GET, POST, OPTIONS, DELETE",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Api-Key, Api-Key, Mcp-Session-Id, Accept",
+  "Access-Control-Expose-Headers": "Mcp-Session-Id",
 };
 
 /**
@@ -68,6 +70,7 @@ export async function handleRequest(normalized: NormalizedRequest): Promise<Hand
     return { statusCode: 200, headers: CORS_HEADERS, body: "" };
   }
 
+  // Health: GET / or GET /health (not /mcp)
   if (path.includes("/health") || (method === "GET" && !path.includes("/mcp"))) {
     const tools = server.getTools();
     return {
@@ -81,6 +84,21 @@ export async function handleRequest(normalized: NormalizedRequest): Promise<Hand
         availableTools: tools.map((t) => t.name),
       }),
     };
+  }
+
+  // Streamable HTTP: GET on MCP path opens SSE stream; we're stateless so return 200 with minimal SSE
+  const isMcpPath = path === "/" || path === "/mcp" || path.startsWith("/mcp/");
+  if (method === "GET" && isMcpPath) {
+    return {
+      statusCode: 200,
+      headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", ...CORS_HEADERS },
+      body: ": keepalive\n\n",
+    };
+  }
+
+  // Streamable HTTP: DELETE terminates session; we're stateless so just ack
+  if (method === "DELETE" && isMcpPath) {
+    return { statusCode: 200, headers: CORS_HEADERS, body: "" };
   }
 
   if (method === "POST") {
@@ -169,9 +187,18 @@ export async function handleRequest(normalized: NormalizedRequest): Promise<Hand
         hasError: !!response.error,
       });
 
+      // Streamable HTTP: return Mcp-Session-Id on initialize so client can send it on subsequent requests
+      const responseHeaders: Record<string, string> = {
+        "Content-Type": "application/json",
+        ...CORS_HEADERS,
+      };
+      if (parsedBody.method === "initialize" && response.result) {
+        responseHeaders["Mcp-Session-Id"] = randomUUID();
+      }
+
       return {
         statusCode: 200,
-        headers: { "Content-Type": "application/json", ...CORS_HEADERS },
+        headers: responseHeaders,
         body: JSON.stringify(response),
       };
     } catch (error) {
