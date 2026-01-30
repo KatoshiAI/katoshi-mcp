@@ -12,6 +12,35 @@ const KATOSHI_API_BASE_URL = process.env.KATOSHI_API_BASE_URL;
 /**
  * Shared helper to execute a trading action via Katoshi Signal API
  */
+/** Normalize args so both snake_case and camelCase from agents are accepted. */
+function normalizeArgs(args: Record<string, unknown>): Record<string, unknown> {
+  const normalized = { ...args };
+  const map: [string, string][] = [
+    ["bot_id", "botId"],
+    ["size_usd", "sizeUsd"],
+    ["size_pct", "sizePct"],
+    ["is_buy", "isBuy"],
+    ["reduce_only", "reduceOnly"],
+    ["slippage_pct", "slippagePct"],
+    ["tp_pct", "tpPct"],
+    ["sl_pct", "slPct"],
+    ["order_id", "orderId"],
+    ["order_ids", "orderIds"],
+    ["start_price", "startPrice"],
+    ["end_price", "endPrice"],
+    ["num_orders", "numOrders"],
+    ["price_start", "priceStart"],
+    ["price_end", "priceEnd"],
+    ["num_grids", "numGrids"],
+  ];
+  for (const [snake, camel] of map) {
+    if (normalized[snake] === undefined && normalized[camel] !== undefined) {
+      normalized[snake] = normalized[camel];
+    }
+  }
+  return normalized;
+}
+
 async function executeAction(
   action: string,
   args: Record<string, unknown>,
@@ -20,6 +49,7 @@ async function executeAction(
   const startTime = Date.now();
   const apiKey = context?.apiKey;
   const userId = context?.userId;
+  const argsNorm = normalizeArgs(args);
 
   if (!KATOSHI_API_BASE_URL) {
     log("error", "KATOSHI_API_BASE_URL environment variable is not set");
@@ -56,15 +86,26 @@ async function executeAction(
     api_key: apiKey,
   };
 
-  setIfValid(payload, "bot_id", args.bot_id);
-  setIfValid(payload, "coin", args.coin);
-  setIfValid(payload, "coins", args.coins);
-  setIfValid(payload, "is_buy", args.is_buy);
-  setIfValid(payload, "reduce_only", args.reduce_only);
-  // Send at most one size parameter; skip empty/0/null
-  const sizeUsd = args.size_usd !== undefined && args.size_usd !== null && Number(args.size_usd) !== 0 ? args.size_usd : undefined;
-  const size = args.size !== undefined && args.size !== null && Number(args.size) !== 0 ? args.size : undefined;
-  const sizePct = args.size_pct !== undefined && args.size_pct !== null && Number(args.size_pct) !== 0 ? args.size_pct : undefined;
+  // bot_id: accept string or number from agent, always send as integer to API
+  const botIdRaw = argsNorm.bot_id;
+  const botIdInt =
+    botIdRaw !== undefined && botIdRaw !== null && !Number.isNaN(Number(botIdRaw))
+      ? Math.trunc(Number(botIdRaw))
+      : undefined;
+  setIfValid(payload, "bot_id", botIdInt);
+  setIfValid(payload, "coin", argsNorm.coin);
+  setIfValid(payload, "coins", argsNorm.coins);
+  setIfValid(payload, "is_buy", argsNorm.is_buy);
+  setIfValid(payload, "reduce_only", argsNorm.reduce_only);
+  // Send at most one size parameter; skip empty/0/null; coerce to number so API gets numeric values
+  const rawSizeUsd = argsNorm.size_usd;
+  const rawSize = argsNorm.size;
+  const rawSizePct = argsNorm.size_pct;
+  const sizeUsd =
+    rawSizeUsd !== undefined && rawSizeUsd !== null && Number(rawSizeUsd) !== 0 ? Number(rawSizeUsd) : undefined;
+  const size = rawSize !== undefined && rawSize !== null && Number(rawSize) !== 0 ? Number(rawSize) : undefined;
+  const sizePct =
+    rawSizePct !== undefined && rawSizePct !== null && Number(rawSizePct) !== 0 ? Number(rawSizePct) : undefined;
   if (sizeUsd !== undefined) {
     payload.size_usd = sizeUsd;
   } else if (size !== undefined) {
@@ -72,27 +113,27 @@ async function executeAction(
   } else if (sizePct !== undefined) {
     payload.size_pct = sizePct;
   }
-  setIfValid(payload, "price", args.price);
-  setIfValid(payload, "tp_pct", args.tp_pct);
-  setIfValid(payload, "tp", args.tp);
-  setIfValidAllowZero(payload, "sl_pct", args.sl_pct);
-  setIfValidAllowZero(payload, "sl", args.sl);
-  setIfValid(payload, "slippage_pct", args.slippage_pct);
-  setIfValid(payload, "leverage", args.leverage);
-  setIfValid(payload, "is_cross", args.is_cross);
-  setIfValid(payload, "amount", args.amount);
-  setIfValid(payload, "is_add", args.is_add);
-  setIfValid(payload, "order_id", args.order_id);
-  setIfValid(payload, "order_ids", args.order_ids);
-  setIfValid(payload, "dexs", args.dexs);
-  setIfValid(payload, "type", args.type);
-  setIfValid(payload, "start_price", args.start_price);
-  setIfValid(payload, "end_price", args.end_price);
-  setIfValid(payload, "num_orders", args.num_orders);
-  setIfValid(payload, "skew", args.skew);
-  setIfValid(payload, "price_start", args.price_start);
-  setIfValid(payload, "price_end", args.price_end);
-  setIfValid(payload, "grids", args.grids);
+  setIfValid(payload, "price", argsNorm.price);
+  setIfValid(payload, "tp_pct", argsNorm.tp_pct);
+  setIfValid(payload, "tp", argsNorm.tp);
+  setIfValidAllowZero(payload, "sl_pct", argsNorm.sl_pct);
+  setIfValidAllowZero(payload, "sl", argsNorm.sl);
+  setIfValid(payload, "slippage_pct", argsNorm.slippage_pct);
+  setIfValid(payload, "leverage", argsNorm.leverage);
+  setIfValid(payload, "is_cross", argsNorm.is_cross);
+  setIfValid(payload, "amount", argsNorm.amount);
+  setIfValid(payload, "is_add", argsNorm.is_add);
+  setIfValid(payload, "order_id", argsNorm.order_id);
+  setIfValid(payload, "order_ids", argsNorm.order_ids);
+  setIfValid(payload, "dexs", argsNorm.dexs);
+  setIfValid(payload, "type", argsNorm.type);
+  setIfValid(payload, "start_price", argsNorm.start_price);
+  setIfValid(payload, "end_price", argsNorm.end_price);
+  setIfValid(payload, "num_orders", argsNorm.num_orders);
+  setIfValid(payload, "skew", argsNorm.skew);
+  setIfValid(payload, "price_start", argsNorm.price_start);
+  setIfValid(payload, "price_end", argsNorm.price_end);
+  setIfValid(payload, "num_grids", argsNorm.num_grids);
 
   const apiUrl = `${KATOSHI_API_BASE_URL}?id=${encodeURIComponent(userId)}`;
 
@@ -116,7 +157,6 @@ async function executeAction(
         action,
         userId,
         botId: args.bot_id,
-        coin: args.coin,
         statusCode: response.status,
         errorText: errorText.substring(0, 500),
         responseTimeMs: responseTime,
@@ -138,7 +178,12 @@ async function executeAction(
       );
     }
 
-    log("info", "Trading action completed", { action, userId, botId: args.bot_id, coin: args.coin, responseTimeMs: responseTime });
+    log("info", "Trading action completed", {
+      action,
+      userId,
+      botId: argsNorm.bot_id,
+      responseTimeMs: responseTime,
+    });
     return JSON.stringify(data, null, 2);
   } catch (error) {
     if (error instanceof Error && error.message.includes("Katoshi API error")) throw error;
@@ -150,8 +195,18 @@ async function executeAction(
 // --- Handlers (each calls executeAction with fixed action) ---
 
 function requireSize(args: Record<string, unknown>): void {
-  if (args.size === undefined && args.size_usd === undefined && args.size_pct === undefined) {
-    throw new Error("One of size, size_usd, or size_pct is required");
+  const a = normalizeArgs(args);
+  if (a.size === undefined && a.size_usd === undefined && a.size_pct === undefined) {
+    throw new Error("One of size, size_usd, or size_pct is required (e.g. size_usd: 11 for $11 USD)");
+  }
+  const numUsd = Number(a.size_usd);
+  const numSize = Number(a.size);
+  const numPct = Number(a.size_pct);
+  const hasValidUsd = a.size_usd != null && !Number.isNaN(numUsd) && numUsd > 0;
+  const hasValidSize = a.size != null && !Number.isNaN(numSize) && numSize > 0;
+  const hasValidPct = a.size_pct != null && !Number.isNaN(numPct) && numPct > 0;
+  if (!hasValidUsd && !hasValidSize && !hasValidPct) {
+    throw new Error("One of size, size_usd, or size_pct must be a positive number (e.g. size_usd: 11 for $11 USD)");
   }
 }
 
@@ -159,88 +214,95 @@ async function openPosition(
   args: Record<string, unknown>,
   context?: { apiKey?: string; userId?: string }
 ): Promise<string> {
-  if (!args.bot_id) throw new Error("bot_id is required");
-  if (!args.coin) throw new Error("coin is required");
-  if (typeof args.is_buy !== "boolean") throw new Error("is_buy is required (true for long, false for short)");
-  requireSize(args);
-  return executeAction("open_position", args, context);
+  const a = normalizeArgs(args);
+  if (!a.bot_id) throw new Error("bot_id is required");
+  if (!a.coin) throw new Error("coin is required");
+  if (typeof a.is_buy !== "boolean") throw new Error("is_buy is required (true for long, false for short)");
+  requireSize(a);
+  return executeAction("open_position", a, context);
 }
 
 async function closePosition(
   args: Record<string, unknown>,
   context?: { apiKey?: string; userId?: string }
 ): Promise<string> {
-  if (!args.bot_id) throw new Error("bot_id is required");
-  if (!args.coin) throw new Error("coin is required");
-  requireSize(args);
-  return executeAction("close_position", args, context);
+  const a = normalizeArgs(args);
+  if (!a.bot_id) throw new Error("bot_id is required");
+  if (!a.coin) throw new Error("coin is required");
+  requireSize(a);
+  return executeAction("close_position", a, context);
 }
 
 async function marketOrder(
   args: Record<string, unknown>,
   context?: { apiKey?: string; userId?: string }
 ): Promise<string> {
-  if (!args.bot_id) throw new Error("bot_id is required");
-  if (!args.coin) throw new Error("coin is required");
-  if (typeof args.is_buy !== "boolean") throw new Error("is_buy is required");
-  if (typeof args.reduce_only !== "boolean") throw new Error("reduce_only is required");
-  requireSize(args);
-  return executeAction("market_order", args, context);
+  const a = normalizeArgs(args);
+  if (!a.bot_id) throw new Error("bot_id is required");
+  if (!a.coin) throw new Error("coin is required");
+  if (typeof a.is_buy !== "boolean") throw new Error("is_buy is required");
+  if (typeof a.reduce_only !== "boolean") throw new Error("reduce_only is required");
+  requireSize(a);
+  return executeAction("market_order", a, context);
 }
 
 async function limitOrder(
   args: Record<string, unknown>,
   context?: { apiKey?: string; userId?: string }
 ): Promise<string> {
-  if (!args.bot_id) throw new Error("bot_id is required");
-  if (!args.coin) throw new Error("coin is required");
-  if (typeof args.is_buy !== "boolean") throw new Error("is_buy is required");
-  if (typeof args.reduce_only !== "boolean") throw new Error("reduce_only is required");
-  if (args.price === undefined) throw new Error("price is required for limit_order");
-  requireSize(args);
-  return executeAction("limit_order", args, context);
+  const a = normalizeArgs(args);
+  if (!a.bot_id) throw new Error("bot_id is required");
+  if (!a.coin) throw new Error("coin is required");
+  if (typeof a.is_buy !== "boolean") throw new Error("is_buy is required");
+  if (typeof a.reduce_only !== "boolean") throw new Error("reduce_only is required");
+  if (a.price === undefined) throw new Error("price is required for limit_order");
+  requireSize(a);
+  return executeAction("limit_order", a, context);
 }
 
 async function stopMarketOrder(
   args: Record<string, unknown>,
   context?: { apiKey?: string; userId?: string }
 ): Promise<string> {
-  if (!args.bot_id) throw new Error("bot_id is required");
-  if (!args.coin) throw new Error("coin is required");
-  if (typeof args.is_buy !== "boolean") throw new Error("is_buy is required");
-  if (typeof args.reduce_only !== "boolean") throw new Error("reduce_only is required");
-  if (args.price === undefined) throw new Error("price is required for stop_market_order");
-  requireSize(args);
-  return executeAction("stop_market_order", args, context);
+  const a = normalizeArgs(args);
+  if (!a.bot_id) throw new Error("bot_id is required");
+  if (!a.coin) throw new Error("coin is required");
+  if (typeof a.is_buy !== "boolean") throw new Error("is_buy is required");
+  if (typeof a.reduce_only !== "boolean") throw new Error("reduce_only is required");
+  if (a.price === undefined) throw new Error("price is required for stop_market_order");
+  requireSize(a);
+  return executeAction("stop_market_order", a, context);
 }
 
 async function scaleOrder(
   args: Record<string, unknown>,
   context?: { apiKey?: string; userId?: string }
 ): Promise<string> {
-  if (!args.bot_id) throw new Error("bot_id is required");
-  if (!args.coin) throw new Error("coin is required");
-  if (typeof args.is_buy !== "boolean") throw new Error("is_buy is required");
-  if (typeof args.reduce_only !== "boolean") throw new Error("reduce_only is required for scale_order");
-  if (args.start_price === undefined) throw new Error("start_price is required for scale_order");
-  if (args.end_price === undefined) throw new Error("end_price is required for scale_order");
-  if (args.num_orders === undefined) throw new Error("num_orders is required for scale_order");
-  requireSize(args);
-  return executeAction("scale_order", args, context);
+  const a = normalizeArgs(args);
+  if (!a.bot_id) throw new Error("bot_id is required");
+  if (!a.coin) throw new Error("coin is required");
+  if (typeof a.is_buy !== "boolean") throw new Error("is_buy is required");
+  if (typeof a.reduce_only !== "boolean") throw new Error("reduce_only is required for scale_order");
+  if (a.start_price === undefined) throw new Error("start_price is required for scale_order");
+  if (a.end_price === undefined) throw new Error("end_price is required for scale_order");
+  if (a.num_orders === undefined) throw new Error("num_orders is required for scale_order");
+  requireSize(a);
+  return executeAction("scale_order", a, context);
 }
 
 async function gridOrder(
   args: Record<string, unknown>,
   context?: { apiKey?: string; userId?: string }
 ): Promise<string> {
-  if (!args.bot_id) throw new Error("bot_id is required");
-  if (!args.coin) throw new Error("coin is required");
-  if (typeof args.is_buy !== "boolean") throw new Error("is_buy is required");
-  if (args.price_start === undefined) throw new Error("price_start is required for grid_order");
-  if (args.price_end === undefined) throw new Error("price_end is required for grid_order");
-  if (args.grids === undefined) throw new Error("grids is required for grid_order");
-  requireSize(args);
-  return executeAction("grid_order", args, context);
+  const a = normalizeArgs(args);
+  if (!a.bot_id) throw new Error("bot_id is required");
+  if (!a.coin) throw new Error("coin is required");
+  if (typeof a.is_buy !== "boolean") throw new Error("is_buy is required");
+  if (a.price_start === undefined) throw new Error("price_start is required for grid_order");
+  if (a.price_end === undefined) throw new Error("price_end is required for grid_order");
+  if (a.num_grids === undefined) throw new Error("num_grids is required for grid_order");
+  requireSize(a);
+  return executeAction("grid_order", a, context);
 }
 
 async function moveOrder(
@@ -362,8 +424,8 @@ async function cancelTpsl(
 // --- Common schema fragments ---
 
 const botIdProp = {
-  type: "string" as const,
-  description: "The bot ID to execute the action for",
+  type: ["string", "integer"] as const,
+  description: "The bot ID to execute the action for (number or string, e.g. 640 or '640'). Sent as integer to the API.",
 };
 
 const coinProp = {
@@ -411,7 +473,8 @@ const slippageProp = {
 export const katoshiTradingTools: Tool[] = [
   {
     name: "katoshi_open_position",
-    description: "Open a new long or short position for a coin. Require exactly one of size, size_usd, or size_pct. Optional: tp_pct, sl_pct (e.g. 0.01 for 1%, 0.05 for 5%).",
+    description:
+      "Open a new long or short position for a coin at market. You MUST provide exactly one of size, size_usd, or size_pct (e.g. size_usd: 11 for $11 USD). No price parameter—executes at market. Optional: tp_pct, sl_pct (e.g. 0.01 for 1%, 0.05 for 5%).",
     inputSchema: {
       type: "object",
       properties: {
@@ -533,11 +596,11 @@ export const katoshiTradingTools: Tool[] = [
         ...sizeProps,
         price_start: { type: "number" as const, description: "Start of grid price range." },
         price_end: { type: "number" as const, description: "End of grid price range." },
-        grids: { type: "number" as const, description: "Number of grid levels." },
+        num_grids: { type: "number" as const, description: "Number of grid orders to place." },
         ...tpslProps,
         slippage_pct: slippageProp,
       },
-      required: ["bot_id", "coin", "is_buy", "price_start", "price_end", "grids"],
+      required: ["bot_id", "coin", "is_buy", "price_start", "price_end", "num_grids"],
     },
     handler: gridOrder,
   },

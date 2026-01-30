@@ -1,4 +1,5 @@
 import { apiTools } from "./tools/index.js";
+import { log } from "./utils/logger.js";
 
 // MCP Tool type definition
 export interface Tool {
@@ -110,8 +111,14 @@ export class MCPServer {
             throw new Error(`Tool ${params.name} has no handler`);
           }
 
+          const toolArgs = params.arguments ?? {};
+          log("info", "Tool call", {
+            tool: params.name,
+            arguments: toolArgs,
+          });
+
           const toolResult = await tool.handler(
-            params.arguments || {},
+            toolArgs,
             request.context
           );
           result = {
