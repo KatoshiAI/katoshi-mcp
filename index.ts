@@ -1,5 +1,4 @@
 import { createServer, IncomingMessage, ServerResponse } from "node:http";
-import { randomUUID } from "node:crypto";
 import { MCPServer } from "./src/mcp-server.js";
 import { log } from "./src/utils/logger.js";
 
@@ -50,14 +49,12 @@ function getMCPServer(): MCPServer {
 
 const CORS_HEADERS: Record<string, string> = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, POST, OPTIONS, DELETE",
-  "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Api-Key, Api-Key, Mcp-Session-Id, Accept",
-  "Access-Control-Expose-Headers": "Mcp-Session-Id",
+  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Api-Key, Api-Key",
 };
 
 /**
  * Core request handler: takes a normalized HTTP request and returns the response.
- * Used by both the HTTP server (Railway) and can be reused for tests.
  */
 export async function handleRequest(normalized: NormalizedRequest): Promise<HandlerResponse> {
   const server = getMCPServer();
@@ -66,24 +63,13 @@ export async function handleRequest(normalized: NormalizedRequest): Promise<Hand
 
   log("info", "Request received", { method, path, userId });
 
+  // Handle CORS preflight
   if (method === "OPTIONS") {
     return { statusCode: 200, headers: CORS_HEADERS, body: "" };
   }
 
-  const isMcpPath = path === "/" || path === "/mcp" || path.startsWith("/mcp/");
-  const wantsSse = (headers["accept"] || "").toLowerCase().includes("text/event-stream");
-
-  // Streamable HTTP: GET with Accept: text/event-stream = client opening SSE stream; return SSE
-  if (method === "GET" && isMcpPath && wantsSse) {
-    return {
-      statusCode: 200,
-      headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", ...CORS_HEADERS },
-      body: ": keepalive\n\n",
-    };
-  }
-
-  // Health: GET /health or GET / (when client doesn't want SSE)
-  if (path.includes("/health") || (method === "GET" && !path.includes("/mcp"))) {
+  // Health check endpoint
+  if (path.includes("/health") || (method === "GET" && path === "/")) {
     const tools = server.getTools();
     return {
       statusCode: 200,
@@ -98,155 +84,160 @@ export async function handleRequest(normalized: NormalizedRequest): Promise<Hand
     };
   }
 
-  // GET / or GET /mcp without Accept: text/event-stream → health (for backwards compat)
-  if (method === "GET" && isMcpPath) {
-    const tools = server.getTools();
+  // Only POST is supported for MCP requests
+  if (method !== "POST") {
     return {
-      statusCode: 200,
+      statusCode: 405,
       headers: { "Content-Type": "application/json", ...CORS_HEADERS },
       body: JSON.stringify({
-        status: "ok",
-        service: "katoshi-mcp-server",
-        version: "1.0.0",
-        tools: tools.length,
-        availableTools: tools.map((t) => t.name),
+        error: "Method not allowed",
+        message: "Use POST with JSON-RPC 2.0 format or GET /health for health check",
       }),
     };
   }
 
-  // Streamable HTTP: DELETE terminates session; we're stateless so just ack
-  if (method === "DELETE" && isMcpPath) {
-    return { statusCode: 200, headers: CORS_HEADERS, body: "" };
+  // Parse request body
+  let parsedBody: any;
+  try {
+    parsedBody = body ? JSON.parse(body) : {};
+  } catch {
+    return {
+      statusCode: 400,
+      headers: { "Content-Type": "application/json", ...CORS_HEADERS },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: null,
+        error: { code: -32700, message: "Parse error - invalid JSON" },
+      }),
+    };
   }
 
-  if (method === "POST") {
-    let parsedBody: any;
-    try {
-      parsedBody = body ? JSON.parse(body) : {};
-    } catch {
-      return {
-        statusCode: 400,
-        headers: { "Content-Type": "application/json", ...CORS_HEADERS },
-        body: JSON.stringify({
-          jsonrpc: "2.0",
-          id: null,
-          error: { code: -32700, message: "Parse error" },
-        }),
-      };
-    }
+  // Extract and validate API key
+  const headerToken = extractTokenFromHeaders(headers);
+  const queryApiKey = extractApiKeyFromQuery(queryStringParameters);
+  const token = headerToken || queryApiKey;
 
-    const headerToken = extractTokenFromHeaders(headers);
-    const queryApiKey = extractApiKeyFromQuery(queryStringParameters);
-    const token = headerToken || queryApiKey;
-
-    if (!token) {
-      const requestId =
-        parsedBody?.id !== undefined &&
-        parsedBody?.id !== null &&
-        (typeof parsedBody.id === "string" || typeof parsedBody.id === "number")
-          ? parsedBody.id
-          : null;
-      log("error", "Missing API key", { method: parsedBody?.method, userId });
-      return {
-        statusCode: 401,
-        headers: { "Content-Type": "application/json", ...CORS_HEADERS },
-        body: JSON.stringify({
-          jsonrpc: "2.0",
-          id: requestId,
-          error: {
-            code: -32001,
-            message:
-              "Unauthorized - Missing API key. Provide via Authorization: Bearer <key>, X-Api-Key header, or api_key query parameter",
-          },
-        }),
-      };
-    }
-
-    if (!parsedBody.jsonrpc || parsedBody.jsonrpc !== "2.0") {
-      const requestId =
-        parsedBody?.id !== undefined &&
-        parsedBody?.id !== null &&
-        (typeof parsedBody.id === "string" || typeof parsedBody.id === "number")
-          ? parsedBody.id
-          : null;
-      return {
-        statusCode: 400,
-        headers: { "Content-Type": "application/json", ...CORS_HEADERS },
-        body: JSON.stringify({
-          jsonrpc: "2.0",
-          id: requestId,
-          error: { code: -32600, message: "Invalid Request - must be JSON-RPC 2.0" },
-        }),
-      };
-    }
-
+  if (!token) {
     const requestId =
-      parsedBody.id !== undefined &&
-      parsedBody.id !== null &&
+      parsedBody?.id !== undefined &&
+      parsedBody?.id !== null &&
       (typeof parsedBody.id === "string" || typeof parsedBody.id === "number")
         ? parsedBody.id
         : null;
-
-    log("info", "Processing MCP request", { method: parsedBody.method, userId, requestId });
-
-    try {
-      const response = await server.handleRequest({
-        jsonrpc: parsedBody.jsonrpc,
+    log("error", "Missing API key", { method: parsedBody?.method, userId });
+    return {
+      statusCode: 401,
+      headers: { "Content-Type": "application/json", ...CORS_HEADERS },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
         id: requestId,
-        method: parsedBody.method,
-        params: parsedBody.params,
-        context: { apiKey: token, userId: userId || undefined },
-      });
-
-      log("info", "MCP request completed", {
-        method: parsedBody.method,
-        userId,
-        requestId,
-        hasError: !!response.error,
-      });
-
-      // Streamable HTTP: return Mcp-Session-Id on initialize for session-based clients
-      const responseHeaders: Record<string, string> = {
-        "Content-Type": "application/json",
-        ...CORS_HEADERS,
-      };
-      if (parsedBody.method === "initialize" && response.result) {
-        responseHeaders["Mcp-Session-Id"] = randomUUID();
-      }
-
-      return {
-        statusCode: 200,
-        headers: responseHeaders,
-        body: JSON.stringify(response),
-      };
-    } catch (error) {
-      log("error", "MCP request error", {
-        error: error instanceof Error ? error.message : String(error),
-        requestId,
-      });
-      return {
-        statusCode: 500,
-        headers: { "Content-Type": "application/json", ...CORS_HEADERS },
-        body: JSON.stringify({
-          jsonrpc: "2.0",
-          id: requestId,
-          error: {
-            code: -32603,
-            message: error instanceof Error ? error.message : "Internal server error",
-          },
-        }),
-      };
-    }
+        error: {
+          code: -32001,
+          message:
+            "Unauthorized - Missing API key. Provide via Authorization: Bearer <key>, X-Api-Key header, or api_key query parameter",
+        },
+      }),
+    };
   }
 
-  return {
-    statusCode: 404,
-    headers: { "Content-Type": "application/json", ...CORS_HEADERS },
-    body: JSON.stringify({
-      error: "Not found",
-      message: "Use POST with JSON-RPC 2.0 format or GET /health for health check",
-    }),
-  };
+  // Validate JSON-RPC 2.0 format
+  if (!parsedBody.jsonrpc || parsedBody.jsonrpc !== "2.0") {
+    const requestId =
+      parsedBody?.id !== undefined &&
+      parsedBody?.id !== null &&
+      (typeof parsedBody.id === "string" || typeof parsedBody.id === "number")
+        ? parsedBody.id
+        : null;
+    return {
+      statusCode: 400,
+      headers: { "Content-Type": "application/json", ...CORS_HEADERS },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: requestId,
+        error: { code: -32600, message: "Invalid Request - must be JSON-RPC 2.0" },
+      }),
+    };
+  }
+
+  // Validate method is a string
+  if (typeof parsedBody.method !== "string") {
+    const requestId =
+      parsedBody?.id !== undefined &&
+      parsedBody?.id !== null &&
+      (typeof parsedBody.id === "string" || typeof parsedBody.id === "number")
+        ? parsedBody.id
+        : null;
+    return {
+      statusCode: 400,
+      headers: { "Content-Type": "application/json", ...CORS_HEADERS },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: requestId,
+        error: { code: -32600, message: "Invalid Request - method must be a string" },
+      }),
+    };
+  }
+
+  const requestId =
+    parsedBody.id !== undefined &&
+    parsedBody.id !== null &&
+    (typeof parsedBody.id === "string" || typeof parsedBody.id === "number")
+      ? parsedBody.id
+      : null;
+
+  log("info", "Processing MCP request", {
+    method: parsedBody.method,
+    userId,
+    requestId,
+    hasApiKey: !!token,
+  });
+
+  // Handle the MCP request
+  try {
+    const response = await server.handleRequest({
+      jsonrpc: parsedBody.jsonrpc,
+      id: requestId,
+      method: parsedBody.method,
+      params: parsedBody.params,
+      context: { apiKey: token, userId: userId || undefined },
+    });
+
+    log("info", "MCP request completed", {
+      method: parsedBody.method,
+      userId,
+      requestId,
+      hasError: !!response.error,
+    });
+
+    return {
+      statusCode: 200,
+      headers: {
+        "Content-Type": "application/json",
+        ...CORS_HEADERS,
+      },
+      body: JSON.stringify(response),
+    };
+  } catch (error) {
+    log("error", "MCP request error", {
+      error: error instanceof Error ? error.message : String(error),
+      stack: error instanceof Error ? error.stack : undefined,
+      method: parsedBody.method,
+      requestId,
+    });
+
+    return {
+      statusCode: 500,
+      headers: { "Content-Type": "application/json", ...CORS_HEADERS },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: requestId,
+        error: {
+          code: -32603,
+          message: error instanceof Error ? error.message : "Internal server error",
+        },
+      }),
+    };
+  }
 }
 
 function parseUrl(url: string): { pathname: string; query: Record<string, string> } {
@@ -275,7 +266,7 @@ function headersToRecord(headers: IncomingMessage["headers"]): Record<string, st
   return out;
 }
 
-const REQUEST_TIMEOUT_MS = 55_000; // Slightly under typical client timeouts so we respond before client cancels
+const REQUEST_TIMEOUT_MS = 55_000; // Slightly under typical client timeouts
 
 function serve(req: IncomingMessage, res: ServerResponse): void {
   const { pathname, query } = parseUrl(req.url || "/");
@@ -283,8 +274,9 @@ function serve(req: IncomingMessage, res: ServerResponse): void {
   const headers = headersToRecord(req.headers);
   const requestStart = Date.now();
 
+  // Set timeout for long-running requests
   const timeout = setTimeout(() => {
-    if (!res.headersSent) {
+    if (!res.headersSent && !res.writableEnded) {
       log("warn", "Request timeout", { method, path: pathname, durationMs: REQUEST_TIMEOUT_MS });
       res.writeHead(504, { "Content-Type": "application/json", ...CORS_HEADERS });
       res.end(
@@ -296,11 +288,12 @@ function serve(req: IncomingMessage, res: ServerResponse): void {
       );
     }
   }, REQUEST_TIMEOUT_MS);
+
   res.on("finish", () => clearTimeout(timeout));
   res.on("close", () => clearTimeout(timeout));
 
   const sendResponse = (result: HandlerResponse) => {
-    if (res.headersSent) return;
+    if (res.headersSent || res.writableEnded) return;
     const durationMs = Date.now() - requestStart;
     log("info", "Response sent", {
       method,
@@ -320,18 +313,18 @@ function serve(req: IncomingMessage, res: ServerResponse): void {
       headers,
       queryStringParameters: Object.keys(query).length ? query : null,
     };
+
     handleRequest(normalized)
-      .then((result) => {
-        sendResponse(result);
-      })
+      .then(sendResponse)
       .catch((err) => {
         log("error", "Server error", {
           method,
           path: pathname,
           error: err instanceof Error ? err.message : String(err),
+          stack: err instanceof Error ? err.stack : undefined,
           durationMs: Date.now() - requestStart,
         });
-        if (!res.headersSent) {
+        if (!res.headersSent && !res.writableEnded) {
           res.writeHead(500, { "Content-Type": "application/json", ...CORS_HEADERS });
           res.end(
             JSON.stringify({
@@ -345,7 +338,23 @@ function serve(req: IncomingMessage, res: ServerResponse): void {
   };
 
   if (method === "POST") {
-    collectBody(req).then(onBody);
+    collectBody(req)
+      .then(onBody)
+      .catch((err) => {
+        log("error", "Failed to collect request body", {
+          error: err instanceof Error ? err.message : String(err),
+        });
+        if (!res.headersSent && !res.writableEnded) {
+          res.writeHead(400, { "Content-Type": "application/json", ...CORS_HEADERS });
+          res.end(
+            JSON.stringify({
+              jsonrpc: "2.0",
+              id: null,
+              error: { code: -32700, message: "Failed to read request body" },
+            })
+          );
+        }
+      });
   } else {
     onBody("");
   }
@@ -355,6 +364,21 @@ const PORT = Number(process.env.PORT) || 3000;
 const HOST = "::"; // Listen on all interfaces for Railway private network
 
 const server = createServer(serve);
+
+// Graceful shutdown
+process.on("SIGTERM", () => {
+  log("info", "SIGTERM received, shutting down gracefully");
+  server.close(() => {
+    log("info", "Server closed");
+    process.exit(0);
+  });
+
+  // Force close after 10 seconds
+  setTimeout(() => {
+    log("error", "Forced shutdown after timeout");
+    process.exit(1);
+  }, 10000);
+});
 
 server.listen(PORT, HOST, () => {
   log("info", "Katoshi MCP server listening", { host: HOST, port: PORT });
