@@ -66,10 +66,10 @@ async function executeAction(
 
   /** Only add to payload if value is not undefined, null, 0 (number), "" (string), or [] (array). */
   function setIfValid(p: Record<string, unknown>, key: string, value: unknown): void {
-    if (value === undefined || value === null) return;
-    if (typeof value === "number" && value === 0) return;
-    if (typeof value === "string" && value === "") return;
-    if (Array.isArray(value) && value.length === 0) return;
+    // if (value === undefined || value === null) return;
+    // if (typeof value === "number" && value === 0) return;
+    // if (typeof value === "string" && value === "") return;
+    // if (Array.isArray(value) && value.length === 0) return;
     p[key] = value;
   }
 
