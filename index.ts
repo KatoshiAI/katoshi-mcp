@@ -268,10 +268,11 @@ function serve(req: IncomingMessage, res: ServerResponse): void {
   }
 }
 
-const PORT = Number(process.env.PORT) || 3000;
+const PORT = Number(process.env.PORT);
+const HOST = "0.0.0.0"; // Listen on all interfaces for Railway private network
 
 const server = createServer(serve);
 
-server.listen(PORT, () => {
-  log("info", "Katoshi MCP server listening", { port: PORT });
+server.listen(PORT, HOST, () => {
+  log("info", "Katoshi MCP server listening", { host: HOST, port: PORT });
 });
