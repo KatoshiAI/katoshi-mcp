@@ -489,7 +489,7 @@ const tpslTypeEnum = z.union([z.enum(["tpsl", "tp", "sl"]), z.null()]).optional(
 
 export const katoshiTradingTools: SdkToolDefinition[] = [
   {
-    name: "katoshi_open_position",
+    name: "open_position",
     title: "Open Position",
     description:
       "Open a new long or short position for a coin at market. You MUST provide exactly one of size, size_usd, or size_pct (e.g. size_usd: 11 for $11 USD). Do NOT provide the other size parameters. Do NOT include tp_pct, tp, sl_pct, or sl if the user did not specify take-profit or stop-loss - omit these parameters entirely (do not set them to 0 or null).",
@@ -506,7 +506,7 @@ export const katoshiTradingTools: SdkToolDefinition[] = [
     handler: async (args, _extra) => toContent(await openPosition(args, getRequestContext())),
   },
   {
-    name: "katoshi_close_position",
+    name: "close_position",
     title: "Close Position",
     description: "Close an existing position (fully or partially). Optionally restrict to long or short via is_buy; if omitted, closes both.",
     inputSchema: {
@@ -522,7 +522,7 @@ export const katoshiTradingTools: SdkToolDefinition[] = [
     handler: async (args, _extra) => toContent(await closePosition(args, getRequestContext())),
   },
   {
-    name: "katoshi_market_order",
+    name: "market_order",
     title: "Market Order",
     description: "Place a market order (immediate execution at current market price).",
     inputSchema: {
@@ -539,7 +539,7 @@ export const katoshiTradingTools: SdkToolDefinition[] = [
     handler: async (args, _extra) => toContent(await marketOrder(args, getRequestContext())),
   },
   {
-    name: "katoshi_limit_order",
+    name: "limit_order",
     title: "Limit Order",
     description: "Place a limit order at a specific price.",
     inputSchema: {
@@ -557,7 +557,7 @@ export const katoshiTradingTools: SdkToolDefinition[] = [
     handler: async (args, _extra) => toContent(await limitOrder(args, getRequestContext())),
   },
   {
-    name: "katoshi_stop_market_order",
+    name: "stop_market_order",
     title: "Stop Market Order",
     description: "Place a stop market order that triggers a market order when price reaches the trigger level.",
     inputSchema: {
@@ -575,7 +575,7 @@ export const katoshiTradingTools: SdkToolDefinition[] = [
     handler: async (args, _extra) => toContent(await stopMarketOrder(args, getRequestContext())),
   },
   {
-    name: "katoshi_scale_order",
+    name: "scale_order",
     title: "Scale Order (DCA)",
     description: "Place a scale (DCA) order: multiple limit orders between start_price and end_price.",
     inputSchema: {
@@ -596,7 +596,7 @@ export const katoshiTradingTools: SdkToolDefinition[] = [
     handler: async (args, _extra) => toContent(await scaleOrder(args, getRequestContext())),
   },
   {
-    name: "katoshi_grid_order",
+    name: "grid_order",
     title: "Grid Order",
     description: "Place a grid order: automated orders at multiple price levels between price_start and price_end.",
     inputSchema: {
@@ -615,7 +615,7 @@ export const katoshiTradingTools: SdkToolDefinition[] = [
     handler: async (args, _extra) => toContent(await gridOrder(args, getRequestContext())),
   },
   {
-    name: "katoshi_move_order",
+    name: "move_order",
     title: "Move Order",
     description: "Move an existing order to a new price.",
     inputSchema: {
@@ -627,7 +627,7 @@ export const katoshiTradingTools: SdkToolDefinition[] = [
     handler: async (args, _extra) => toContent(await moveOrder(args, getRequestContext())),
   },
   {
-    name: "katoshi_cancel_order",
+    name: "cancel_order",
     title: "Cancel Order",
     description: "Cancel one or more resting orders for a coin. Optionally pass order_ids to cancel specific orders; otherwise cancels all resting orders for the coin.",
     inputSchema: {
@@ -638,7 +638,7 @@ export const katoshiTradingTools: SdkToolDefinition[] = [
     handler: async (args, _extra) => toContent(await cancelOrder(args, getRequestContext())),
   },
   {
-    name: "katoshi_close_all",
+    name: "close_all",
     title: "Close All",
     description: "Close all open positions. Optionally filter by coins, direction (is_buy), size_pct, or dexs.",
     inputSchema: {
@@ -651,7 +651,7 @@ export const katoshiTradingTools: SdkToolDefinition[] = [
     handler: async (args, _extra) => toContent(await closeAll(args, getRequestContext())),
   },
   {
-    name: "katoshi_sell_all",
+    name: "sell_all",
     title: "Sell All",
     description: "Sell (liquidate) all positions. Optionally filter by coins or size_pct.",
     inputSchema: {
@@ -662,7 +662,7 @@ export const katoshiTradingTools: SdkToolDefinition[] = [
     handler: async (args, _extra) => toContent(await sellAll(args, getRequestContext())),
   },
   {
-    name: "katoshi_clear_all",
+    name: "clear_all",
     title: "Clear All",
     description: "Close all positions and cancel all orders. Optionally filter by coins or dexs.",
     inputSchema: {
@@ -673,7 +673,7 @@ export const katoshiTradingTools: SdkToolDefinition[] = [
     handler: async (args, _extra) => toContent(await clearAll(args, getRequestContext())),
   },
   {
-    name: "katoshi_cancel_all",
+    name: "cancel_all",
     title: "Cancel All",
     description: "Cancel all resting orders. Optionally filter by coins, order_ids, or dexs.",
     inputSchema: {
@@ -685,7 +685,7 @@ export const katoshiTradingTools: SdkToolDefinition[] = [
     handler: async (args, _extra) => toContent(await cancelAll(args, getRequestContext())),
   },
   {
-    name: "katoshi_set_leverage",
+    name: "set_leverage",
     title: "Set Leverage",
     description: "Set leverage and margin mode (cross or isolated) for a coin.",
     inputSchema: {
@@ -697,7 +697,7 @@ export const katoshiTradingTools: SdkToolDefinition[] = [
     handler: async (args, _extra) => toContent(await setLeverage(args, getRequestContext())),
   },
   {
-    name: "katoshi_adjust_margin",
+    name: "adjust_margin",
     title: "Adjust Margin",
     description: "Add or remove margin for a position.",
     inputSchema: {
@@ -709,21 +709,21 @@ export const katoshiTradingTools: SdkToolDefinition[] = [
     handler: async (args, _extra) => toContent(await adjustMargin(args, getRequestContext())),
   },
   {
-    name: "katoshi_start_bot",
+    name: "start_bot",
     title: "Start Bot",
     description: "Start a trading bot.",
     inputSchema: { bot_id: botIdSchema },
     handler: async (args, _extra) => toContent(await startBot(args, getRequestContext())),
   },
   {
-    name: "katoshi_stop_bot",
+    name: "stop_bot",
     title: "Stop Bot",
     description: "Stop a trading bot.",
     inputSchema: { bot_id: botIdSchema },
     handler: async (args, _extra) => toContent(await stopBot(args, getRequestContext())),
   },
   {
-    name: "katoshi_modify_tpsl",
+    name: "modify_tpsl",
     title: "Modify TP/SL",
     description: "Modify take-profit and/or stop-loss levels for a position. Provide at least one of tp_pct, sl_pct, tp, or sl.",
     inputSchema: {
@@ -734,7 +734,7 @@ export const katoshiTradingTools: SdkToolDefinition[] = [
     handler: async (args, _extra) => toContent(await modifyTpsl(args, getRequestContext())),
   },
   {
-    name: "katoshi_cancel_tpsl",
+    name: "cancel_tpsl",
     title: "Cancel TP/SL",
     description: "Cancel take-profit and/or stop-loss orders for a position. Optionally restrict by type: tpsl (both), tp, or sl.",
     inputSchema: {
