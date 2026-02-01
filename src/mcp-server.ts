@@ -16,8 +16,7 @@ export function createMcpServer(): McpServer {
       name: "katoshi-mcp-server",
       version: "1.0.0",
       title: "Katoshi MCP Server",
-      description:
-        "MCP server for Katoshi: trading tools (orders, positions, leverage, TP/SL), Hyperliquid market data (mids, candles, account summaries), and bot controls. Use for perps/spot trading and portfolio management.",
+      description: "The Katoshi MCP Server provides a complete toolkit for executing orders, managing positions, and analyzing market data on the Hyperliquid exchange.",
     },
     { capabilities: { tools: {} } }
   );

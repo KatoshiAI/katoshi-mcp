@@ -1,8 +1,6 @@
 import type { ZodRawShapeCompat } from "@modelcontextprotocol/sdk/server/zod-compat.js";
-// import { hyperliquidApiTools } from "./hyperliquid-tools.js";
+import { hyperliquidApiTools } from "./hyperliquid-tools.js";
 import { katoshiTradingTools } from "./katoshi-tools.js";
-// Import additional tool modules here
-// import { userApiTools } from "./user-apis.js";
 
 /**
  * Result shape returned by MCP tool handlers (SDK CallToolResult).
@@ -42,7 +40,6 @@ export function toContent(text: string): CallToolResult {
 
 // Combine all tool modules (SDK format: Zod inputSchema + CallToolResult handler)
 export const apiTools: SdkToolDefinition[] = [
-  // ...hyperliquidApiTools, // Disabled - focusing on trading tools
-  ...katoshiTradingTools,
-  // ...userApiTools,
+  ...hyperliquidApiTools,
+  ...katoshiTradingTools
 ];
