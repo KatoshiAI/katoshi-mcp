@@ -1,4 +1,4 @@
-import * as z from "zod";
+import { z } from "zod";
 import { getRequestContext } from "./request-context.js";
 import { log } from "./utils.js";
 import { toContent, type SdkToolDefinition } from "./tool-registry.js";
@@ -9,11 +9,80 @@ import { toContent, type SdkToolDefinition } from "./tool-registry.js";
  * Endpoint: https://api.katoshi.ai/signal
  */
 
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
 const KATOSHI_API_BASE_URL = process.env.KATOSHI_API_BASE_URL;
 
+const BOT_ID_HINT = "Provide bot_id (e.g. 640).";
+const COIN_HINT = "Provide coin (e.g. BTC, ETH).";
+const IS_BUY_HINT = "Provide is_buy (true for long, false for short).";
+const REDUCE_ONLY_HINT = "Provide reduce_only (true/false).";
+const PRICE_HINT = "Provide price (number).";
+const ORDER_ID_HINT = "Provide order_id (order ID).";
+const LEVERAGE_HINT = "Provide leverage (number).";
+const IS_CROSS_HINT = "Provide is_cross (true = cross, false = isolated).";
+const AMOUNT_HINT = "Provide amount (number).";
+const IS_ADD_HINT = "Provide is_add (true = add margin, false = remove).";
+const START_PRICE_HINT = "Provide start_price (number) for scale_order.";
+const END_PRICE_HINT = "Provide end_price (number) for scale_order.";
+const NUM_ORDERS_HINT = "Provide num_orders (number) for scale_order.";
+const PRICE_START_HINT = "Provide price_start (number) for grid_order.";
+const PRICE_END_HINT = "Provide price_end (number) for grid_order.";
+const NUM_GRIDS_HINT = "Provide num_grids (number) for grid_order.";
+const TPSL_HINT = "Provide at least one of: sl_pct, tp_pct, sl, tp.";
+
+// ---------------------------------------------------------------------------
+// Schemas
+// ---------------------------------------------------------------------------
+const optionalNumber = (description: string) => z.number().nullish().describe(description);
+const optionalBoolean = (description: string) => z.union([z.boolean(), z.null()]).optional().describe(description);
+const optionalStringArray = (description: string) => z.union([z.array(z.string()), z.null()]).optional().describe(description);
+
+const botIdSchema = z.union([z.number(), z.string()]).describe("The bot ID to execute the action for (number or string, e.g. 640 or '640'). Sent as integer to the API.");
+const coinSchema = z.string().describe("The coin symbol (e.g., 'BTC', 'ETH', 'SOL')");
+const isBuySchema = z.boolean().describe("Trade direction: true for long/buy, false for short/sell");
+const reduceOnlySchema = z.boolean().describe("If true, only close/reduce. If false, can open or close. Perps only.");
+const sizeSchema = optionalNumber("Size in contracts (e.g. 0.005). Provide exactly ONE of size, size_usd, or size_pct. Use null or omit for the other two. Do not send 0.");
+const sizeUsdSchema = optionalNumber("Size in USD (e.g. 11). Provide exactly ONE of size, size_usd, or size_pct. Use null or omit for the other two. Do not send 0.");
+const sizePctSchema = optionalNumber("Size as fraction (e.g. 0.1 for 10%). Provide exactly ONE of size, size_usd, or size_pct. Use null or omit for the other two. Do not send 0.");
+const tpslSchemas = {
+  tp_pct: z.number().nullish().describe("Take-profit as % from entry (e.g. 0.02 for 2%). Use null or omit if user did not specify. Do not send 0."),
+  sl_pct: z.number().nullish().describe("Stop-loss as % from entry (e.g. 0.01 for 1%). Use null or omit if user did not specify. Do not send 0."),
+  tp: z.number().nullish().describe("Take-profit as price. Use null or omit if user did not specify. Do not send 0."),
+  sl: z.number().nullish().describe("Stop-loss as price. Use null or omit if user did not specify. Do not send 0."),
+};
+const slippagePctSchema = z.number().nullish().describe("Max slippage % (e.g. 0.05 for 5%). Use null or omit unless user specifies. Do not send 0.");
+const tpslTypeEnum = z.union([z.enum(["tpsl", "tp", "sl"]), z.null()]).optional().describe("Optional: 'tpsl' = both (default), 'tp' = take-profit only, 'sl' = stop-loss only. Use null or omit for default.");
+const requiredNumberSchema = z.union([z.number(), z.string()]).transform((v) => (typeof v === "string" ? Number(v) : v)).refine((n) => Number.isFinite(n), "must be a number");
+const orderIdSchema = z.union([z.number(), z.string()]).describe("Order ID (number or string).");
+const isCrossSchema = z.boolean().describe("true = cross margin, false = isolated.");
+const isAddSchema = z.boolean().describe("true = add margin, false = remove margin.");
+
+// ---------------------------------------------------------------------------
+// Utils
+// ---------------------------------------------------------------------------
+
 /**
- * Shared helper to execute a trading action via Katoshi Signal API
+ * Validate a single field with a Zod schema and throw in the same format as hyperliquid-tools:
+ * "Invalid or missing {fieldName}: {schema error}. {hint}"
  */
+function requireField<T>(
+  value: unknown,
+  schema: z.ZodType<T>,
+  fieldName: string,
+  hint: string
+): T {
+  const parsed = schema.safeParse(value);
+  if (!parsed.success) {
+    throw new Error(
+      `Invalid or missing ${fieldName}: ${parsed.error.message}. ${hint}`
+    );
+  }
+  return parsed.data;
+}
+
 /** Coerce to number only when value is a number; otherwise undefined (avoids sending 0/null by mistake). */
 function asNumber(v: unknown): number | undefined {
   return typeof v === "number" ? v : undefined;
@@ -57,6 +126,8 @@ function normalizeArgs(args: Record<string, unknown>): Record<string, unknown> {
     ["price_start", "priceStart"],
     ["price_end", "priceEnd"],
     ["num_grids", "numGrids"],
+    ["is_cross", "isCross"],
+    ["is_add", "isAdd"],
   ];
   for (const [snake, camel] of map) {
     if (normalized[snake] === undefined && normalized[camel] !== undefined) {
@@ -229,8 +300,7 @@ async function executeAction(
   }
 }
 
-// --- Handlers (each calls executeAction with fixed action) ---
-
+/** Require at least one of size, size_usd, or size_pct to be a positive number. */
 function requireSize(args: Record<string, unknown>): void {
   const a = normalizeArgs(args);
   if (a.size === undefined && a.size_usd === undefined && a.size_pct === undefined) {
@@ -247,14 +317,18 @@ function requireSize(args: Record<string, unknown>): void {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Tools
+// ---------------------------------------------------------------------------
+
 async function openPosition(
   args: Record<string, unknown>,
   context?: { apiKey?: string; userId?: string }
 ): Promise<string> {
   const a = normalizeArgs(args);
-  if (!a.bot_id) throw new Error("bot_id is required");
-  if (!a.coin) throw new Error("coin is required");
-  if (typeof a.is_buy !== "boolean") throw new Error("is_buy is required (true for long, false for short)");
+  requireField(a.bot_id, botIdSchema, "bot_id", BOT_ID_HINT);
+  requireField(a.coin, coinSchema, "coin", COIN_HINT);
+  requireField(a.is_buy, isBuySchema, "is_buy", IS_BUY_HINT);
   requireSize(a);
   return executeAction("open_position", a, context);
 }
@@ -264,8 +338,8 @@ async function closePosition(
   context?: { apiKey?: string; userId?: string }
 ): Promise<string> {
   const a = normalizeArgs(args);
-  if (!a.bot_id) throw new Error("bot_id is required");
-  if (!a.coin) throw new Error("coin is required");
+  requireField(a.bot_id, botIdSchema, "bot_id", BOT_ID_HINT);
+  requireField(a.coin, coinSchema, "coin", COIN_HINT);
   requireSize(a);
   return executeAction("close_position", a, context);
 }
@@ -275,10 +349,10 @@ async function marketOrder(
   context?: { apiKey?: string; userId?: string }
 ): Promise<string> {
   const a = normalizeArgs(args);
-  if (!a.bot_id) throw new Error("bot_id is required");
-  if (!a.coin) throw new Error("coin is required");
-  if (typeof a.is_buy !== "boolean") throw new Error("is_buy is required");
-  if (typeof a.reduce_only !== "boolean") throw new Error("reduce_only is required");
+  requireField(a.bot_id, botIdSchema, "bot_id", BOT_ID_HINT);
+  requireField(a.coin, coinSchema, "coin", COIN_HINT);
+  requireField(a.is_buy, isBuySchema, "is_buy", IS_BUY_HINT);
+  requireField(a.reduce_only, reduceOnlySchema, "reduce_only", REDUCE_ONLY_HINT);
   requireSize(a);
   return executeAction("market_order", a, context);
 }
@@ -288,11 +362,11 @@ async function limitOrder(
   context?: { apiKey?: string; userId?: string }
 ): Promise<string> {
   const a = normalizeArgs(args);
-  if (!a.bot_id) throw new Error("bot_id is required");
-  if (!a.coin) throw new Error("coin is required");
-  if (typeof a.is_buy !== "boolean") throw new Error("is_buy is required");
-  if (typeof a.reduce_only !== "boolean") throw new Error("reduce_only is required");
-  if (a.price === undefined) throw new Error("price is required for limit_order");
+  requireField(a.bot_id, botIdSchema, "bot_id", BOT_ID_HINT);
+  requireField(a.coin, coinSchema, "coin", COIN_HINT);
+  requireField(a.is_buy, isBuySchema, "is_buy", IS_BUY_HINT);
+  requireField(a.reduce_only, reduceOnlySchema, "reduce_only", REDUCE_ONLY_HINT);
+  requireField(a.price, requiredNumberSchema, "price", PRICE_HINT);
   requireSize(a);
   return executeAction("limit_order", a, context);
 }
@@ -302,11 +376,11 @@ async function stopMarketOrder(
   context?: { apiKey?: string; userId?: string }
 ): Promise<string> {
   const a = normalizeArgs(args);
-  if (!a.bot_id) throw new Error("bot_id is required");
-  if (!a.coin) throw new Error("coin is required");
-  if (typeof a.is_buy !== "boolean") throw new Error("is_buy is required");
-  if (typeof a.reduce_only !== "boolean") throw new Error("reduce_only is required");
-  if (a.price === undefined) throw new Error("price is required for stop_market_order");
+  requireField(a.bot_id, botIdSchema, "bot_id", BOT_ID_HINT);
+  requireField(a.coin, coinSchema, "coin", COIN_HINT);
+  requireField(a.is_buy, isBuySchema, "is_buy", IS_BUY_HINT);
+  requireField(a.reduce_only, reduceOnlySchema, "reduce_only", REDUCE_ONLY_HINT);
+  requireField(a.price, requiredNumberSchema, "price", PRICE_HINT);
   requireSize(a);
   return executeAction("stop_market_order", a, context);
 }
@@ -316,13 +390,13 @@ async function scaleOrder(
   context?: { apiKey?: string; userId?: string }
 ): Promise<string> {
   const a = normalizeArgs(args);
-  if (!a.bot_id) throw new Error("bot_id is required");
-  if (!a.coin) throw new Error("coin is required");
-  if (typeof a.is_buy !== "boolean") throw new Error("is_buy is required");
-  if (typeof a.reduce_only !== "boolean") throw new Error("reduce_only is required for scale_order");
-  if (a.start_price === undefined) throw new Error("start_price is required for scale_order");
-  if (a.end_price === undefined) throw new Error("end_price is required for scale_order");
-  if (a.num_orders === undefined) throw new Error("num_orders is required for scale_order");
+  requireField(a.bot_id, botIdSchema, "bot_id", BOT_ID_HINT);
+  requireField(a.coin, coinSchema, "coin", COIN_HINT);
+  requireField(a.is_buy, isBuySchema, "is_buy", IS_BUY_HINT);
+  requireField(a.reduce_only, reduceOnlySchema, "reduce_only", REDUCE_ONLY_HINT);
+  requireField(a.start_price, requiredNumberSchema, "start_price", START_PRICE_HINT);
+  requireField(a.end_price, requiredNumberSchema, "end_price", END_PRICE_HINT);
+  requireField(a.num_orders, requiredNumberSchema, "num_orders", NUM_ORDERS_HINT);
   requireSize(a);
   return executeAction("scale_order", a, context);
 }
@@ -332,12 +406,12 @@ async function gridOrder(
   context?: { apiKey?: string; userId?: string }
 ): Promise<string> {
   const a = normalizeArgs(args);
-  if (!a.bot_id) throw new Error("bot_id is required");
-  if (!a.coin) throw new Error("coin is required");
-  if (typeof a.is_buy !== "boolean") throw new Error("is_buy is required");
-  if (a.price_start === undefined) throw new Error("price_start is required for grid_order");
-  if (a.price_end === undefined) throw new Error("price_end is required for grid_order");
-  if (a.num_grids === undefined) throw new Error("num_grids is required for grid_order");
+  requireField(a.bot_id, botIdSchema, "bot_id", BOT_ID_HINT);
+  requireField(a.coin, coinSchema, "coin", COIN_HINT);
+  requireField(a.is_buy, isBuySchema, "is_buy", IS_BUY_HINT);
+  requireField(a.price_start, requiredNumberSchema, "price_start", PRICE_START_HINT);
+  requireField(a.price_end, requiredNumberSchema, "price_end", PRICE_END_HINT);
+  requireField(a.num_grids, requiredNumberSchema, "num_grids", NUM_GRIDS_HINT);
   requireSize(a);
   return executeAction("grid_order", a, context);
 }
@@ -346,146 +420,133 @@ async function moveOrder(
   args: Record<string, unknown>,
   context?: { apiKey?: string; userId?: string }
 ): Promise<string> {
-  if (!args.bot_id) throw new Error("bot_id is required");
-  if (!args.coin) throw new Error("coin is required");
-  if (!args.order_id) throw new Error("order_id is required for move_order");
-  if (args.price === undefined) throw new Error("price is required for move_order");
-  return executeAction("move_order", args, context);
+  const a = normalizeArgs(args);
+  requireField(a.bot_id, botIdSchema, "bot_id", BOT_ID_HINT);
+  requireField(a.coin, coinSchema, "coin", COIN_HINT);
+  requireField(a.order_id, orderIdSchema, "order_id", ORDER_ID_HINT);
+  requireField(a.price, requiredNumberSchema, "price", PRICE_HINT);
+  return executeAction("move_order", a, context);
 }
 
 async function cancelOrder(
   args: Record<string, unknown>,
   context?: { apiKey?: string; userId?: string }
 ): Promise<string> {
-  if (!args.bot_id) throw new Error("bot_id is required");
-  if (!args.coin) throw new Error("coin is required");
-  return executeAction("cancel_order", args, context);
+  const a = normalizeArgs(args);
+  requireField(a.bot_id, botIdSchema, "bot_id", BOT_ID_HINT);
+  requireField(a.coin, coinSchema, "coin", COIN_HINT);
+  return executeAction("cancel_order", a, context);
 }
 
 async function closeAll(
   args: Record<string, unknown>,
   context?: { apiKey?: string; userId?: string }
 ): Promise<string> {
-  if (!args.bot_id) throw new Error("bot_id is required");
-  return executeAction("close_all", args, context);
+  const a = normalizeArgs(args);
+  requireField(a.bot_id, botIdSchema, "bot_id", BOT_ID_HINT);
+  return executeAction("close_all", a, context);
 }
 
 async function sellAll(
   args: Record<string, unknown>,
   context?: { apiKey?: string; userId?: string }
 ): Promise<string> {
-  if (!args.bot_id) throw new Error("bot_id is required");
-  return executeAction("sell_all", args, context);
+  const a = normalizeArgs(args);
+  requireField(a.bot_id, botIdSchema, "bot_id", BOT_ID_HINT);
+  return executeAction("sell_all", a, context);
 }
 
 async function clearAll(
   args: Record<string, unknown>,
   context?: { apiKey?: string; userId?: string }
 ): Promise<string> {
-  if (!args.bot_id) throw new Error("bot_id is required");
-  return executeAction("clear_all", args, context);
+  const a = normalizeArgs(args);
+  requireField(a.bot_id, botIdSchema, "bot_id", BOT_ID_HINT);
+  return executeAction("clear_all", a, context);
 }
 
 async function cancelAll(
   args: Record<string, unknown>,
   context?: { apiKey?: string; userId?: string }
 ): Promise<string> {
-  if (!args.bot_id) throw new Error("bot_id is required");
-  return executeAction("cancel_all", args, context);
+  const a = normalizeArgs(args);
+  requireField(a.bot_id, botIdSchema, "bot_id", BOT_ID_HINT);
+  return executeAction("cancel_all", a, context);
 }
 
 async function setLeverage(
   args: Record<string, unknown>,
   context?: { apiKey?: string; userId?: string }
 ): Promise<string> {
-  if (!args.bot_id) throw new Error("bot_id is required");
-  if (!args.coin) throw new Error("coin is required");
-  if (args.leverage === undefined) throw new Error("leverage is required for set_leverage");
-  if (typeof args.is_cross !== "boolean") throw new Error("is_cross is required for set_leverage");
-  return executeAction("set_leverage", args, context);
+  const a = normalizeArgs(args);
+  requireField(a.bot_id, botIdSchema, "bot_id", BOT_ID_HINT);
+  requireField(a.coin, coinSchema, "coin", COIN_HINT);
+  requireField(a.leverage, requiredNumberSchema, "leverage", LEVERAGE_HINT);
+  requireField(a.is_cross, isCrossSchema, "is_cross", IS_CROSS_HINT);
+  return executeAction("set_leverage", a, context);
 }
 
 async function adjustMargin(
   args: Record<string, unknown>,
   context?: { apiKey?: string; userId?: string }
 ): Promise<string> {
-  if (!args.bot_id) throw new Error("bot_id is required");
-  if (!args.coin) throw new Error("coin is required");
-  if (args.amount === undefined) throw new Error("amount is required for adjust_margin");
-  if (typeof args.is_add !== "boolean") throw new Error("is_add is required for adjust_margin");
-  return executeAction("adjust_margin", args, context);
+  const a = normalizeArgs(args);
+  requireField(a.bot_id, botIdSchema, "bot_id", BOT_ID_HINT);
+  requireField(a.coin, coinSchema, "coin", COIN_HINT);
+  requireField(a.amount, requiredNumberSchema, "amount", AMOUNT_HINT);
+  requireField(a.is_add, isAddSchema, "is_add", IS_ADD_HINT);
+  return executeAction("adjust_margin", a, context);
 }
 
 async function startBot(
   args: Record<string, unknown>,
   context?: { apiKey?: string; userId?: string }
 ): Promise<string> {
-  if (!args.bot_id) throw new Error("bot_id is required");
-  return executeAction("start_bot", args, context);
+  const a = normalizeArgs(args);
+  requireField(a.bot_id, botIdSchema, "bot_id", BOT_ID_HINT);
+  return executeAction("start_bot", a, context);
 }
 
 async function stopBot(
   args: Record<string, unknown>,
   context?: { apiKey?: string; userId?: string }
 ): Promise<string> {
-  if (!args.bot_id) throw new Error("bot_id is required");
-  return executeAction("stop_bot", args, context);
+  const a = normalizeArgs(args);
+  requireField(a.bot_id, botIdSchema, "bot_id", BOT_ID_HINT);
+  return executeAction("stop_bot", a, context);
 }
 
 async function modifyTpsl(
   args: Record<string, unknown>,
   context?: { apiKey?: string; userId?: string }
 ): Promise<string> {
-  if (!args.bot_id) throw new Error("bot_id is required");
-  if (!args.coin) throw new Error("coin is required");
+  const a = normalizeArgs(args);
+  requireField(a.bot_id, botIdSchema, "bot_id", BOT_ID_HINT);
+  requireField(a.coin, coinSchema, "coin", COIN_HINT);
   if (
-    args.sl_pct === undefined &&
-    args.tp_pct === undefined &&
-    args.sl === undefined &&
-    args.tp === undefined
+    a.sl_pct === undefined &&
+    a.tp_pct === undefined &&
+    a.sl === undefined &&
+    a.tp === undefined
   ) {
-    throw new Error("modify_tpsl requires at least one of: sl_pct, tp_pct, sl, tp");
+    throw new Error(`Invalid or missing tpsl: at least one of sl_pct, tp_pct, sl, tp is required. ${TPSL_HINT}`);
   }
-  return executeAction("modify_tpsl", args, context);
+  return executeAction("modify_tpsl", a, context);
 }
 
 async function cancelTpsl(
   args: Record<string, unknown>,
   context?: { apiKey?: string; userId?: string }
 ): Promise<string> {
-  if (!args.bot_id) throw new Error("bot_id is required");
-  if (!args.coin) throw new Error("coin is required");
-  return executeAction("cancel_tpsl", args, context);
+  const a = normalizeArgs(args);
+  requireField(a.bot_id, botIdSchema, "bot_id", BOT_ID_HINT);
+  requireField(a.coin, coinSchema, "coin", COIN_HINT);
+  return executeAction("cancel_tpsl", a, context);
 }
 
-// --- Zod schema fragments (SDK inputSchema) ---
-
-const botIdSchema = z
-  .union([z.number(), z.string()])
-  .describe("The bot ID to execute the action for (number or string, e.g. 640 or '640'). Sent as integer to the API.");
-const coinSchema = z.string().describe("The coin symbol (e.g., 'BTC', 'ETH', 'SOL')");
-const isBuySchema = z.boolean().describe("Trade direction: true for long/buy, false for short/sell");
-const reduceOnlySchema = z.boolean().describe("If true, only close/reduce. If false, can open or close. Perps only.");
-// Optional number fields: use number | null so LLM can send null for "not specified". Do not send 0.
-const optionalNumber = (description: string) =>
-  z.union([z.number(), z.null()]).optional().describe(description);
-const sizeSchema = optionalNumber("Size in contracts (e.g. 0.005). Provide exactly ONE of size, size_usd, or size_pct. Use null or omit for the other two. Do not send 0.");
-const sizeUsdSchema = optionalNumber("Size in USD (e.g. 11). Provide exactly ONE of size, size_usd, or size_pct. Use null or omit for the other two. Do not send 0.");
-const sizePctSchema = optionalNumber("Size as fraction (e.g. 0.1 for 10%). Provide exactly ONE of size, size_usd, or size_pct. Use null or omit for the other two. Do not send 0.");
-const tpslSchemas = {
-  tp_pct: z.union([z.number(), z.null()]).optional().describe("Take-profit as % from entry (e.g. 0.02 for 2%). Use null or omit if user did not specify. Do not send 0."),
-  sl_pct: z.union([z.number(), z.null()]).optional().describe("Stop-loss as % from entry (e.g. 0.01 for 1%). Use null or omit if user did not specify. Do not send 0."),
-  tp: z.union([z.number(), z.null()]).optional().describe("Take-profit as price. Use null or omit if user did not specify. Do not send 0."),
-  sl: z.union([z.number(), z.null()]).optional().describe("Stop-loss as price. Use null or omit if user did not specify. Do not send 0."),
-};
-const slippagePctSchema = z.union([z.number(), z.null()]).optional().describe("Max slippage % (e.g. 0.05 for 5%). Use null or omit unless user specifies. Do not send 0.");
-
-// Optional booleans/arrays/enum: accept null so agents don't send 0 or wrong types.
-const optionalBoolean = (description: string) =>
-  z.union([z.boolean(), z.null()]).optional().describe(description);
-const optionalStringArray = (description: string) =>
-  z.union([z.array(z.string()), z.null()]).optional().describe(description);
-const tpslTypeEnum = z.union([z.enum(["tpsl", "tp", "sl"]), z.null()]).optional().describe("Optional: 'tpsl' = both (default), 'tp' = take-profit only, 'sl' = stop-loss only. Use null or omit for default.");
+// ---------------------------------------------------------------------------
+// Tool Definitions
+// ---------------------------------------------------------------------------
 
 export const katoshiTradingTools: SdkToolDefinition[] = [
   {
@@ -621,7 +682,7 @@ export const katoshiTradingTools: SdkToolDefinition[] = [
     inputSchema: {
       bot_id: botIdSchema,
       coin: coinSchema,
-      order_id: z.string().describe("ID of the order to move."),
+      order_id: orderIdSchema,
       price: z.number().describe("New price for the order."),
     },
     handler: async (args, _extra) => toContent(await moveOrder(args, getRequestContext())),
