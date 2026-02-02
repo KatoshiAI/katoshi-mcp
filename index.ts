@@ -41,14 +41,16 @@ export async function handleRequest(normalized: NormalizedRequest): Promise<Hand
     return { statusCode: 200, headers: CORS_HEADERS, body: "" };
   }
 
-  if (path.includes("/health") || (method === "GET" && path === "/")) {
+  if (path === "/health" || (method === "GET" && path === "/")) {
     return {
       statusCode: 200,
       headers: { "Content-Type": "application/json", ...CORS_HEADERS },
       body: JSON.stringify({
-        status: "ok",
+        status: "healthy",
         service: "katoshi-mcp-server",
         version: "1.0.0",
+        timestamp: new Date().toISOString(),
+        uptime_seconds: Math.round((Date.now() - SERVER_START_MS) / 1000 * 100) / 100,
         tools: apiTools.length,
         availableTools: apiTools.map((t) => t.name),
       }),
@@ -78,6 +80,7 @@ export async function handleRequest(normalized: NormalizedRequest): Promise<Hand
 }
 
 const REQUEST_TIMEOUT_MS = 55_000; // Slightly under typical client timeouts
+const SERVER_START_MS = Date.now();
 
 function serve(req: IncomingMessage, res: ServerResponse): void {
   const { pathname, query } = parseUrl(req.url || "/");
