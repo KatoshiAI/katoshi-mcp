@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { getRequestContext } from "./request-context.js";
 import { log } from "./utils.js";
-import { toContent, type SdkToolDefinition } from "./tool-registry.js";
+import { toContent, type SdkToolDefinition } from "./tool-common.js";
 
 /**
  * Katoshi Trading API tools

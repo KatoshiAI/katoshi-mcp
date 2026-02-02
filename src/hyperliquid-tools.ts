@@ -6,7 +6,7 @@ import {
 } from "@nktkas/hyperliquid";
 import { z } from "zod";
 import { getRequestContext } from "./request-context.js";
-import { toContent, type SdkToolDefinition } from "./tool-registry.js";
+import { toContent, type SdkToolDefinition } from "./tool-common.js";
 
 /**
  * Hyperliquid API tools
