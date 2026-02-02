@@ -120,21 +120,32 @@ async function getSubscriptionSnapshot<T>(
   const firstDataPromise = new Promise<T>((resolve) => {
     resolveFirst = resolve;
   });
-  const timeoutPromise = new Promise<T>((_, reject) => {
-    setTimeout(
-      () => reject(new Error(DEFAULT_WS_TIMEOUT_MESSAGE)),
+
+  let timedOut = false;
+  let timeoutId: ReturnType<typeof setTimeout>;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timeoutId = setTimeout(
+      () => {
+        timedOut = true;
+        reject(new Error(DEFAULT_WS_TIMEOUT_MESSAGE));
+      },
       DEFAULT_WS_TIMEOUT_MS
     );
   });
 
   let subscription: SubscriptionHandle | null = null;
   try {
-    await wsTransport.ready();
-    subscription = await subscribe(subClient, (data) => {
-      resolveFirst(data);
-    });
+    await Promise.race([wsTransport.ready(), timeoutPromise]);
+    subscription = await Promise.race([
+      subscribe(subClient, (data) => {
+        if (timedOut) return;
+        resolveFirst(data);
+      }),
+      timeoutPromise,
+    ]);
     return await Promise.race([firstDataPromise, timeoutPromise]);
   } finally {
+    clearTimeout(timeoutId!);
     if (subscription) await subscription.unsubscribe().catch(() => {});
     await wsTransport.close().catch(() => {});
   }
