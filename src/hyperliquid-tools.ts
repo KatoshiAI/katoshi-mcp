@@ -395,6 +395,153 @@ async function getSpotAccountSummary(
   }
 }
 
+/** Portfolio period snapshot from SDK (accountValueHistory, pnlHistory, vlm). */
+type PortfolioPeriod = {
+  accountValueHistory: [number, string][];
+  pnlHistory: [number, string][];
+  vlm: string;
+};
+
+/** Period metrics: PnL, ROE, and start value (for deriving spot). */
+type PeriodMetrics = { pnl: number; roe: number; startValue: number };
+
+/**
+ * Derive PnL, ROE and start value for a single period from history arrays.
+ * PnL = change in pnl over the period; ROE = PnL / starting equity.
+ */
+function periodMetrics(period: PortfolioPeriod): PeriodMetrics {
+  const av = period.accountValueHistory;
+  const pnl = period.pnlHistory;
+  const startValue = av?.length ? parseDecimal(av[0][1]) : 0;
+  const startPnl = pnl?.length ? parseDecimal(pnl[0][1]) : 0;
+  const endPnl = pnl?.length ? parseDecimal(pnl[pnl.length - 1][1]) : 0;
+  const periodPnl = endPnl - startPnl;
+  const roe = startValue !== 0 ? periodPnl / startValue : 0;
+  return { pnl: periodPnl, roe, startValue };
+}
+
+/** Account-type overview: accountValue, pnl (current + periods), roe (periods only). */
+type AccountOverview = {
+  accountValue: string;
+  pnl: { current: string; day: string; week: string; month: string; all: string };
+  roe: { day: string; week: string; month: string; all: string };
+};
+
+/**
+ * Build account overview from raw periods: accountValue, pnl { current, day, week, month, all }, roe { day, week, month, all }.
+ * byPeriod must have day, week, month, allTime (e.g. from API for total, or mapped perpDay→day etc. for perp).
+ */
+function buildAccountOverview(byPeriod: Record<string, PortfolioPeriod>): AccountOverview {
+  const all = byPeriod.allTime;
+  const day = byPeriod.day ? periodMetrics(byPeriod.day) : { pnl: 0, roe: 0, startValue: 0 };
+  const week = byPeriod.week ? periodMetrics(byPeriod.week) : { pnl: 0, roe: 0, startValue: 0 };
+  const month = byPeriod.month ? periodMetrics(byPeriod.month) : { pnl: 0, roe: 0, startValue: 0 };
+  const allM = all ? periodMetrics(all) : { pnl: 0, roe: 0, startValue: 0 };
+
+  const currentAccountValue = all?.accountValueHistory?.length
+    ? parseDecimal(all.accountValueHistory[all.accountValueHistory.length - 1][1])
+    : 0;
+  const currentPnl = all?.pnlHistory?.length
+    ? parseDecimal(all.pnlHistory[all.pnlHistory.length - 1][1])
+    : 0;
+
+  return {
+    accountValue: formatDecimal(currentAccountValue),
+    pnl: {
+      current: formatDecimal(currentPnl),
+      day: formatDecimal(day.pnl),
+      week: formatDecimal(week.pnl),
+      month: formatDecimal(month.pnl),
+      all: formatDecimal(allM.pnl),
+    },
+    roe: {
+      day: formatDecimal(day.roe),
+      week: formatDecimal(week.roe),
+      month: formatDecimal(month.roe),
+      all: formatDecimal(allM.roe),
+    },
+  };
+}
+
+/**
+ * Derive spot overview from total minus perp (account value, pnl current + by period, roe by period).
+ */
+function buildSpotOverview(
+  totalByPeriod: Record<string, PortfolioPeriod>,
+  perpByPeriod: Record<string, PortfolioPeriod>
+): AccountOverview {
+  const totalAll = totalByPeriod.allTime;
+  const perpAll = perpByPeriod.perpAllTime;
+  const currentAccountValue = (totalAll?.accountValueHistory?.length ? parseDecimal(totalAll.accountValueHistory[totalAll.accountValueHistory.length - 1][1]) : 0) -
+    (perpAll?.accountValueHistory?.length ? parseDecimal(perpAll.accountValueHistory[perpAll.accountValueHistory.length - 1][1]) : 0);
+  const currentPnl = (totalAll?.pnlHistory?.length ? parseDecimal(totalAll.pnlHistory[totalAll.pnlHistory.length - 1][1]) : 0) -
+    (perpAll?.pnlHistory?.length ? parseDecimal(perpAll.pnlHistory[perpAll.pnlHistory.length - 1][1]) : 0);
+
+  const keys: Array<{ total: keyof typeof totalByPeriod; perp: keyof typeof perpByPeriod }> = [
+    { total: "day", perp: "perpDay" },
+    { total: "week", perp: "perpWeek" },
+    { total: "month", perp: "perpMonth" },
+    { total: "allTime", perp: "perpAllTime" },
+  ];
+  const pnl: AccountOverview["pnl"] = { current: formatDecimal(currentPnl), day: "0", week: "0", month: "0", all: "0" };
+  const roe: AccountOverview["roe"] = { day: "0", week: "0", month: "0", all: "0" };
+  for (const { total, perp } of keys) {
+    const t = totalByPeriod[total] ? periodMetrics(totalByPeriod[total]) : { pnl: 0, roe: 0, startValue: 0 };
+    const p = perpByPeriod[perp] ? periodMetrics(perpByPeriod[perp]) : { pnl: 0, roe: 0, startValue: 0 };
+    const spotPnl = t.pnl - p.pnl;
+    const spotStartValue = t.startValue - p.startValue;
+    const spotRoe = spotStartValue !== 0 ? spotPnl / spotStartValue : 0;
+    const periodKey = total === "allTime" ? "all" : total;
+    pnl[periodKey as keyof typeof pnl] = formatDecimal(spotPnl);
+    roe[periodKey as keyof typeof roe] = formatDecimal(spotRoe);
+  }
+
+  return {
+    accountValue: formatDecimal(currentAccountValue),
+    pnl,
+    roe,
+  };
+}
+
+/**
+ * Retrieve portfolio overview for a user by account type (total, perp, spot).
+ * Total and perp come from the API; spot is derived as total minus perp.
+ * Each type has current account value & PnL and by-period (day/week/month/all) PnL & ROE.
+ * Uses the Hyperliquid SDK InfoClient portfolio.
+ */
+export async function getPortfolioOverview(
+  args: Record<string, unknown>,
+  _context?: { apiKey?: string; userId?: string }
+): Promise<string> {
+  const user = requireField(args?.user, userSchema, "user", USER_HINT);
+  try {
+    const data = await infoClient.portfolio({ user });
+    // data: [["day", {...}], ["week", ...], ["month", ...], ["allTime", ...], ["perpDay", ...], ["perpWeek", ...], ["perpMonth", ...], ["perpAllTime", ...]]
+    const byPeriod = Object.fromEntries(data) as Record<string, PortfolioPeriod>;
+
+    const total = buildAccountOverview(byPeriod);
+    const perp = buildAccountOverview({
+      day: byPeriod.perpDay,
+      week: byPeriod.perpWeek,
+      month: byPeriod.perpMonth,
+      allTime: byPeriod.perpAllTime,
+    });
+    const spot = buildSpotOverview(byPeriod, byPeriod);
+
+    const overview = {
+      user,
+      total,
+      perp,
+      spot,
+    };
+    return JSON.stringify(overview, null, 2);
+  } catch (error) {
+    const errorMessage =
+      error instanceof Error ? error.message : String(error);
+    throw new Error(`Failed to retrieve portfolio overview: ${errorMessage}`);
+  }
+}
+
 
 /** Default periods for indicators (standard defaults). */
 const DEFAULT_RSI_PERIOD = 14;
@@ -877,6 +1024,14 @@ export const hyperliquidApiTools: SdkToolDefinition[] = [
     inputSchema: { user: userSchema },
     handler: async (args, _extra) =>
       toContent(await getSpotAccountSummary(args, getRequestContext())),
+  },
+  {
+    name: "get_portfolio_overview",
+    title: "Get Portfolio Overview",
+    description: "Retrieve portfolio overview for a user by type (total, perp, spot): current value, PnL, and ROE for day/week/month/all.",
+    inputSchema: { user: userSchema },
+    handler: async (args, _extra) =>
+      toContent(await getPortfolioOverview(args, getRequestContext())),
   },
   {
     name: "get_market_data",
