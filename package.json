@@ -19,6 +19,7 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.25.3",
     "@nktkas/hyperliquid": "^0.30.3",
+    "technicalindicators": "^3.1.0",
     "zod": "^4.3.6"
   }
 }

@@ -20,8 +20,8 @@ if ! git rev-parse --git-dir > /dev/null 2>&1; then
     exit 1
 fi
 
-# Check if there are uncommitted changes
-if ! git diff-index --quiet HEAD --; then
+# Check if there are uncommitted changes (use status --porcelain so skip-worktree files don't block)
+if [ -n "$(git status --porcelain)" ]; then
     echo -e "${RED}❌ Error: You have uncommitted changes${NC}"
     echo -e "${YELLOW}Please commit or stash your changes before deploying${NC}"
     exit 1
