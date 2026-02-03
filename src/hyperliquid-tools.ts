@@ -4,7 +4,17 @@ import {
   SubscriptionClient,
   WebSocketTransport,
 } from "@nktkas/hyperliquid";
-import { ATR, BollingerBands, EMA, MACD, RSI } from "technicalindicators";
+import { ATR, BollingerBands, EMA, MACD, RSI, SMA, VWAP } from "technicalindicators";
+// technicalindicators – available exports (revisit for more tools):
+// Moving averages: SMA, EMA, WMA, WEMA, MACD
+// Oscillators: RSI, CCI, AwesomeOscillator
+// Volatility: BollingerBands, KeltnerChannels, ChandelierExit
+// Directional/trend: ATR, TrueRange, ADX, PlusDM, MinusDM
+// Momentum: ROC, KST, PSAR, Stochastic, WilliamsR, TRIX, StochasticRSI
+// Volume: ADL, OBV, ForceIndex, VWAP, VolumeProfile, MFI
+// Chart types: Renko, HeikinAshi, TypicalPrice
+// Ichimoku: IchimokuCloud
+// Utils: AverageGain, AverageLoss, SD, Highest, Lowest, Sum, CrossUp, CrossDown, Fibonacci
 import { z } from "zod";
 import { getRequestContext } from "./request-context.js";
 import { toContent, type SdkToolDefinition } from "./tool-common.js";
@@ -42,9 +52,10 @@ const INTERVAL_MS: Record<z.infer<typeof candleIntervalSchema>, number> = {
 
 const DEFAULT_CANDLE_COUNT = 10;
 const MAX_CANDLE_COUNT = 30;
-/** When computing indicators we fetch extra candles for lookback (e.g. MACD needs ~35). */
-const INDICATOR_LOOKBACK = 50;
-const MAX_CANDLES_FOR_INDICATORS = 100;
+/** Fallback lookback when no indicators requested (keeps one fetch path). */
+const DEFAULT_INDICATOR_LOOKBACK = 50;
+/** Hardcap: max candles we may fetch for indicator warmup (e.g. EMA 200 + count). */
+const MAX_CANDLES_FOR_INDICATORS = 500;
 
 const DEFAULT_WS_TIMEOUT_MS = 3_000;
 const DEFAULT_WS_TIMEOUT_MESSAGE = "WebSocket subscription timeout";
@@ -63,14 +74,14 @@ const candleIntervalSchema = z.enum(["1m", "3m", "5m", "15m", "30m", "1h", "2h",
 const candleCountSchema = z.number().int().min(1).max(MAX_CANDLE_COUNT).nullish();
 
 const indicatorNameSchema = z
-  .enum(["rsi", "macd", "atr", "bollingerBands", "ema"])
-  .describe("Indicator: rsi, macd, atr, bollingerBands, ema");
+  .enum(["rsi", "macd", "atr", "bollingerBands", "ema", "sma", "vwap"])
+  .describe("Indicator: rsi, macd, atr, bollingerBands, ema, sma, vwap");
 const indicatorsSchema = z
   .array(indicatorNameSchema)
   .min(1)
-  .max(5)
+  .max(7)
   .optional()
-  .describe("Optional list of indicators to compute (rsi, macd, atr, bollingerBands, ema).");
+  .describe("Optional list of indicators to compute (rsi, macd, atr, bollingerBands, ema, sma, vwap).");
 
 const rsiPeriodSchema = z.number().int().min(2).max(30).nullish().describe("RSI period (default 14).");
 const macdFastPeriodSchema = z.number().int().min(2).max(20).nullish().describe("MACD fast period (default 12).");
@@ -79,7 +90,8 @@ const macdSignalPeriodSchema = z.number().int().min(2).max(20).nullish().describ
 const atrPeriodSchema = z.number().int().min(2).max(30).nullish().describe("ATR period (default 14).");
 const bbPeriodSchema = z.number().int().min(2).max(50).nullish().describe("Bollinger Bands period (default 20).");
 const bbStdDevSchema = z.number().min(1).max(3).nullish().describe("Bollinger Bands standard deviations (default 2).");
-const emaPeriodSchema = z.number().int().min(2).max(100).nullish().describe("EMA period (default 20).");
+const emaPeriodSchema = z.number().int().min(2).max(200).nullish().describe("EMA period (default 20, max 200).");
+const smaPeriodSchema = z.number().int().min(2).max(200).nullish().describe("SMA period (default 20, max 200).");
 
 // ---------------------------------------------------------------------------
 // Utils
@@ -109,6 +121,22 @@ function parseDecimal(s: string | undefined): number {
   if (s === undefined || s === "") return 0;
   const n = Number(s);
   return Number.isFinite(n) ? n : 0;
+}
+
+/** Classify single-candle shape from OHLC (doji, hammer, inverted_hammer, bullish, bearish). */
+function getCandleType(open: number, high: number, low: number, close: number): string {
+  const range = high - low;
+  if (range <= 0 || !Number.isFinite(range)) return "doji";
+  const body = Math.abs(close - open);
+  const bodyRatio = body / range;
+  const upperWick = high - Math.max(open, close);
+  const lowerWick = Math.min(open, close) - low;
+  const minBody = range * 0.02;
+
+  if (bodyRatio < 0.1) return "doji";
+  if (lowerWick >= 2 * body && upperWick <= Math.max(minBody, body * 0.5)) return "hammer";
+  if (upperWick >= 2 * body && lowerWick <= Math.max(minBody, body * 0.5)) return "inverted_hammer";
+  return close >= open ? "bullish" : "bearish";
 }
 
 /** Format number to string with up to 6 decimal places, no trailing zeros. */
@@ -368,63 +396,10 @@ async function getSpotAccountSummary(
 }
 
 
-/**
- * Retrieve candle snapshot for a coin and interval
- * Uses the Hyperliquid SDK InfoClient candleSnapshot
- * Fetches the last N candles (default 10, max 30); time range derived from interval.
- */
-async function getCandleSnapshot(
-  args: Record<string, unknown>,
-  _context?: { apiKey?: string; userId?: string }
-): Promise<string> {
-  const coin = requireField(args?.coin, coinSchema, "coin", COIN_HINT);
-  const interval = requireField(
-    args?.interval,
-    candleIntervalSchema,
-    "interval",
-    INTERVAL_HINT
-  );
-  const countParsed = candleCountSchema.safeParse(args?.count);
-  const count = countParsed.success
-    ? Math.min(MAX_CANDLE_COUNT, Math.max(1, countParsed.data ?? DEFAULT_CANDLE_COUNT))
-    : DEFAULT_CANDLE_COUNT;
-  const endTime = Date.now();
-  const rangeMs = count * INTERVAL_MS[interval];
-  const startTime = endTime - rangeMs;
-  try {
-    const data = await infoClient.candleSnapshot({
-      coin,
-      interval,
-      startTime,
-      endTime,
-    });
-    // Transform to descriptive keys and add ISO timestamps for AI readability
-    const raw = Array.isArray(data) ? data : [data];
-    const transformed = raw
-      .map(
-        (c: { T: number; o: string; h: string; l: string; c: string; v: string; s: string; i: string }) => ({
-          symbol: c.s,
-          interval: c.i,
-          closeTime: c.T,
-          closeTimeIso: new Date(c.T).toISOString(),
-          open: c.o,
-          high: c.h,
-          low: c.l,
-          close: c.c,
-          volume: c.v,
-        })
-      )
-      .slice(-count);
-    return JSON.stringify(transformed, null, 2);
-  } catch (error) {
-    const errorMessage =
-      error instanceof Error ? error.message : String(error);
-    throw new Error(`Failed to retrieve candle snapshot: ${errorMessage}`);
-  }
-}
-
 /** Default periods for indicators (standard defaults). */
 const DEFAULT_RSI_PERIOD = 14;
+/** Length of SMA applied to RSI (for rsiSma and crossover). */
+const RSI_SMA_LENGTH = 14;
 const DEFAULT_MACD_FAST = 12;
 const DEFAULT_MACD_SLOW = 26;
 const DEFAULT_MACD_SIGNAL = 9;
@@ -432,6 +407,7 @@ const DEFAULT_ATR_PERIOD = 14;
 const DEFAULT_BB_PERIOD = 20;
 const DEFAULT_BB_STDDEV = 2;
 const DEFAULT_EMA_PERIOD = 20;
+const DEFAULT_SMA_PERIOD = 20;
 
 type CandleRow = {
   T: number;
@@ -445,14 +421,47 @@ type CandleRow = {
 };
 
 /**
- * Fetch more candles when indicators are requested (need lookback for warmup).
+ * Compute required candle lookback from requested indicators and their periods.
+ * Each indicator needs at least its period (MACD needs slow + signal) for warmup.
+ */
+function getRequiredIndicatorLookback(
+  indicators: string[] | null,
+  periods: {
+    rsiPeriod: number;
+    macdSlow: number;
+    macdSignal: number;
+    atrPeriod: number;
+    bbPeriod: number;
+    emaPeriod: number;
+    smaPeriod: number;
+  }
+): number {
+  if (!indicators?.length) return DEFAULT_INDICATOR_LOOKBACK;
+  let lookback = 0;
+  // RSI SMA needs rsiPeriod + RSI_SMA_LENGTH candles for RSI, then (RSI_SMA_LENGTH - 1) more for first SMA value
+  if (indicators.includes("rsi"))
+    lookback = Math.max(lookback, periods.rsiPeriod + RSI_SMA_LENGTH + (RSI_SMA_LENGTH - 1));
+  if (indicators.includes("macd"))
+    lookback = Math.max(lookback, periods.macdSlow + periods.macdSignal);
+  if (indicators.includes("atr")) lookback = Math.max(lookback, periods.atrPeriod);
+  if (indicators.includes("bollingerBands")) lookback = Math.max(lookback, periods.bbPeriod);
+  if (indicators.includes("ema")) lookback = Math.max(lookback, periods.emaPeriod);
+  if (indicators.includes("sma")) lookback = Math.max(lookback, periods.smaPeriod);
+  // VWAP is cumulative per candle, no extra warmup
+  if (indicators.includes("vwap")) lookback = Math.max(lookback, 1);
+  return lookback || DEFAULT_INDICATOR_LOOKBACK;
+}
+
+/**
+ * Fetch enough candles for count + indicator warmup (lookback from indicator periods).
  */
 async function fetchCandlesForIndicators(
   coin: string,
   interval: z.infer<typeof candleIntervalSchema>,
-  count: number
+  count: number,
+  lookback: number
 ): Promise<CandleRow[]> {
-  const fetchCount = Math.min(MAX_CANDLES_FOR_INDICATORS, count + INDICATOR_LOOKBACK);
+  const fetchCount = Math.min(MAX_CANDLES_FOR_INDICATORS, count + lookback);
   const endTime = Date.now();
   const rangeMs = fetchCount * INTERVAL_MS[interval];
   const startTime = endTime - rangeMs;
@@ -470,7 +479,7 @@ async function fetchCandlesForIndicators(
  * Retrieve candle snapshot with optional technical indicators (RSI, MACD, ATR, Bollinger Bands).
  * Fetches enough candles for indicator warmup, computes selected indicators, returns last N candles with values.
  */
-async function getCandleSnapshotWithIndicators(
+export async function getCandleSnapshotWithIndicators(
   args: Record<string, unknown>,
   _context?: { apiKey?: string; userId?: string }
 ): Promise<string> {
@@ -497,10 +506,21 @@ async function getCandleSnapshotWithIndicators(
   const atrPeriod = Math.min(30, Math.max(2, Number(args?.atrPeriod) || DEFAULT_ATR_PERIOD));
   const bbPeriod = Math.min(50, Math.max(2, Number(args?.bbPeriod) || DEFAULT_BB_PERIOD));
   const bbStdDev = Math.min(3, Math.max(1, Number(args?.bbStdDev) || DEFAULT_BB_STDDEV));
-  const emaPeriod = Math.min(100, Math.max(2, Number(args?.emaPeriod) || DEFAULT_EMA_PERIOD));
+  const emaPeriod = Math.min(200, Math.max(2, Number(args?.emaPeriod) || DEFAULT_EMA_PERIOD));
+  const smaPeriod = Math.min(200, Math.max(2, Number(args?.smaPeriod) || DEFAULT_SMA_PERIOD));
+
+  const lookback = getRequiredIndicatorLookback(indicators ?? null, {
+    rsiPeriod,
+    macdSlow,
+    macdSignal,
+    atrPeriod,
+    bbPeriod,
+    emaPeriod,
+    smaPeriod,
+  });
 
   try {
-    const raw = await fetchCandlesForIndicators(coin, interval, count);
+    const raw = await fetchCandlesForIndicators(coin, interval, count, lookback);
     const n = raw.length;
     if (n === 0) {
       return JSON.stringify({ candles: [], message: "No candle data returned." }, null, 2);
@@ -509,19 +529,35 @@ async function getCandleSnapshotWithIndicators(
     const high = raw.map((c) => parseDecimal(c.h));
     const low = raw.map((c) => parseDecimal(c.l));
     const close = raw.map((c) => parseDecimal(c.c));
+    const volume = raw.map((c) => parseDecimal(c.v));
 
     type IndicatorResults = {
       rsi?: (number | undefined)[];
+      rsiSma?: (number | undefined)[];
       macd?: { MACD?: number; signal?: number; histogram?: number }[];
       atr?: (number | undefined)[];
       bollingerBands?: { middle: number; upper: number; lower: number; pb?: number }[];
       ema?: number[];
+      sma?: number[];
+      vwap?: number[];
     };
     const results: IndicatorResults = {};
 
     if (indicators?.includes("rsi")) {
       const rsiResult = RSI.calculate({ values: close, period: rsiPeriod });
       results.rsi = rsiResult.map((v) => (Number.isFinite(v) ? v : undefined));
+      // 14-period SMA of RSI via library (for rsiSma value and RSI vs RSI-SMA crossover)
+      const from = rsiPeriod; // RSI has values from this index onward
+      const rsiSlice = results.rsi!.slice(from) as number[];
+      const smaResult =
+        rsiSlice.length >= RSI_SMA_LENGTH
+          ? SMA.calculate({ period: RSI_SMA_LENGTH, values: rsiSlice })
+          : [];
+      const pad = from + RSI_SMA_LENGTH - 1;
+      results.rsiSma = [
+        ...Array.from<undefined>({ length: pad }).fill(undefined),
+        ...smaResult,
+      ];
     }
     if (indicators?.includes("macd")) {
       const macdResult = MACD.calculate({
@@ -549,6 +585,12 @@ async function getCandleSnapshotWithIndicators(
     if (indicators?.includes("ema")) {
       results.ema = EMA.calculate({ values: close, period: emaPeriod });
     }
+    if (indicators?.includes("sma")) {
+      results.sma = SMA.calculate({ values: close, period: smaPeriod });
+    }
+    if (indicators?.includes("vwap")) {
+      results.vwap = VWAP.calculate({ high, low, close, volume });
+    }
 
     /** Index into indicator result array for candle at globalIndex (results may be shorter due to warmup). */
     const idx = (arr: unknown[] | undefined, globalIndex: number) =>
@@ -557,70 +599,194 @@ async function getCandleSnapshotWithIndicators(
     const takeLast = raw.slice(-count);
     const candles = takeLast.map((c, i) => {
       const globalIndex = n - count + i;
+      const openN = parseDecimal(c.o);
+      const highN = parseDecimal(c.h);
+      const lowN = parseDecimal(c.l);
+      const closeN = parseDecimal(c.c);
+      const volumeN = parseDecimal(c.v);
+      const timestampIso = new Date(c.T).toISOString();
+
+      const prevCandle = globalIndex > 0 ? raw[globalIndex - 1] : undefined;
+      const prevClose = prevCandle != null ? parseDecimal(prevCandle.c) : null;
+      const priceChange =
+        prevClose != null && Number.isFinite(prevClose)
+          ? closeN - prevClose
+          : null;
+      const priceChangePct =
+        prevClose != null && Number.isFinite(prevClose) && prevClose !== 0
+          ? Math.round((closeN - prevClose) / prevClose * 10000) / 100
+          : null;
+
       const row: Record<string, unknown> = {
-        symbol: c.s,
-        interval: c.i,
-        closeTime: c.T,
-        closeTimeIso: new Date(c.T).toISOString(),
-        open: c.o,
-        high: c.h,
-        low: c.l,
-        close: c.c,
-        volume: c.v,
+        timestamp: c.T,
+        timestampIso,
+        candleType: getCandleType(openN, highN, lowN, closeN),
+        priceChange: priceChange ?? null,
+        priceChangePct: priceChangePct ?? null,
+        ohlcv: {
+          open: openN,
+          high: highN,
+          low: lowN,
+          close: closeN,
+          volume: volumeN,
+        },
       };
+
+      const ind: Record<string, unknown> = {};
+      let hasIndicators = false;
+
       if (results.rsi?.length) {
         const ri = idx(results.rsi, globalIndex);
         const val = ri >= 0 ? results.rsi[ri] : undefined;
-        row.rsi = val != null ? formatDecimal(val) : null;
+        const prevRi = idx(results.rsi, globalIndex - 1);
+        const prevVal = prevRi >= 0 ? results.rsi![prevRi] : undefined;
+        const rsiSmaVal = results.rsiSma && ri >= 0 ? results.rsiSma[ri] : undefined;
+        const prevRsiSmaRi = results.rsiSma ? idx(results.rsiSma, globalIndex - 1) : -1;
+        const prevRsiSmaVal = prevRsiSmaRi >= 0 ? results.rsiSma![prevRsiSmaRi] : undefined;
+        let rsiCrossover: "bullish" | "bearish" | null = null;
+        if (
+          prevVal != null && Number.isFinite(prevVal) &&
+          prevRsiSmaVal != null && Number.isFinite(prevRsiSmaVal) &&
+          val != null && Number.isFinite(val) &&
+          rsiSmaVal != null && Number.isFinite(rsiSmaVal)
+        ) {
+          if (prevVal < prevRsiSmaVal && val > rsiSmaVal) rsiCrossover = "bullish";
+          else if (prevVal > prevRsiSmaVal && val < rsiSmaVal) rsiCrossover = "bearish";
+        }
+        if (val != null && Number.isFinite(val)) {
+          const trend: "bullish" | "bearish" | "neutral" =
+            rsiSmaVal != null && Number.isFinite(rsiSmaVal)
+              ? val > rsiSmaVal
+                ? "bullish"
+                : val < rsiSmaVal
+                  ? "bearish"
+                  : "neutral"
+              : "neutral";
+          ind.rsi = {
+            value: val,
+            rsiSma: rsiSmaVal != null && Number.isFinite(rsiSmaVal) ? rsiSmaVal : null,
+            trend,
+            crossover: rsiCrossover ?? null,
+            zone: val < 30 ? "oversold" : val > 70 ? "overbought" : "neutral",
+          };
+          hasIndicators = true;
+        }
       }
       if (results.macd?.length) {
         const ri = idx(results.macd, globalIndex);
         const m = ri >= 0 ? results.macd[ri] : undefined;
-        row.macd = m
-          ? {
-              macd: m.MACD != null ? formatDecimal(m.MACD) : null,
-              signal: m.signal != null ? formatDecimal(m.signal) : null,
-              histogram: m.histogram != null ? formatDecimal(m.histogram) : null,
-            }
-          : null;
+        const prevRi = idx(results.macd, globalIndex - 1);
+        const prevM = prevRi >= 0 ? results.macd[prevRi] : undefined;
+        const prevHist = prevM?.histogram;
+        const currHist = m?.histogram;
+        let crossover: "bullish" | "bearish" | null = null;
+        if (
+          prevHist != null &&
+          Number.isFinite(prevHist) &&
+          currHist != null &&
+          Number.isFinite(currHist)
+        ) {
+          if (prevHist < 0 && currHist > 0) crossover = "bullish";
+          else if (prevHist > 0 && currHist < 0) crossover = "bearish";
+        }
+        if (m && (m.MACD != null || m.signal != null || m.histogram != null)) {
+          const h = m.histogram ?? 0;
+          const trend: "bullish" | "bearish" | "neutral" =
+            h > 0 ? "bullish" : h < 0 ? "bearish" : "neutral";
+          ind.macd = {
+            line: m.MACD ?? null,
+            signal: m.signal ?? null,
+            histogram: m.histogram ?? null,
+            trend,
+            crossover,
+          };
+          hasIndicators = true;
+        }
       }
       if (results.atr?.length) {
         const ri = idx(results.atr, globalIndex);
         const val = ri >= 0 ? results.atr[ri] : undefined;
-        row.atr = val != null ? formatDecimal(val) : null;
+        if (val != null && Number.isFinite(val)) {
+          ind.atr = val;
+          hasIndicators = true;
+        }
       }
       if (results.bollingerBands?.length) {
         const ri = idx(results.bollingerBands, globalIndex);
         const b = ri >= 0 ? results.bollingerBands[ri] : undefined;
-        row.bollingerBands = b
-          ? {
-              middle: formatDecimal(b.middle),
-              upper: formatDecimal(b.upper),
-              lower: formatDecimal(b.lower),
-              pb: b.pb != null ? formatDecimal(b.pb) : undefined,
-            }
-          : null;
+        if (b) {
+          const pb =
+            b.pb != null && Number.isFinite(b.pb)
+              ? b.pb
+              : b.upper - b.lower !== 0
+                ? (closeN - b.lower) / (b.upper - b.lower)
+                : null;
+          ind.bb = {
+            upper: b.upper,
+            middle: b.middle,
+            lower: b.lower,
+            percentB: pb != null ? Math.round(pb * 100) / 100 : null,
+          };
+          hasIndicators = true;
+        }
       }
       if (results.ema?.length) {
         const ri = idx(results.ema, globalIndex);
         const val = ri >= 0 ? results.ema[ri] : undefined;
-        row.ema = val != null ? formatDecimal(val) : null;
+        if (val != null && Number.isFinite(val)) {
+          const trend: "bullish" | "bearish" | "neutral" =
+            closeN > val ? "bullish" : closeN < val ? "bearish" : "neutral";
+          ind.ema = { value: val, trend };
+          hasIndicators = true;
+        }
       }
+      if (results.sma?.length) {
+        const ri = idx(results.sma, globalIndex);
+        const val = ri >= 0 ? results.sma[ri] : undefined;
+        if (val != null && Number.isFinite(val)) {
+          const trend: "bullish" | "bearish" | "neutral" =
+            closeN > val ? "bullish" : closeN < val ? "bearish" : "neutral";
+          ind.sma = { value: val, trend };
+          hasIndicators = true;
+        }
+      }
+      if (results.vwap?.length) {
+        const ri = idx(results.vwap, globalIndex);
+        const val = ri >= 0 ? results.vwap[ri] : undefined;
+        if (val != null && Number.isFinite(val)) {
+          const trend: "bullish" | "bearish" | "neutral" =
+            closeN > val ? "bullish" : closeN < val ? "bearish" : "neutral";
+          ind.vwap = { value: val, trend };
+          hasIndicators = true;
+        }
+      }
+      if (hasIndicators) row.indicators = ind;
       return row;
     });
 
+    const firstCandle = candles[0] as Record<string, unknown> | undefined;
+    const lastCandle = candles[candles.length - 1] as Record<string, unknown> | undefined;
     const meta = indicators?.length
       ? {
-          indicators,
-          params: {
-            rsiPeriod: indicators.includes("rsi") ? rsiPeriod : undefined,
-            macdFast: indicators.includes("macd") ? macdFast : undefined,
-            macdSlow: indicators.includes("macd") ? macdSlow : undefined,
-            macdSignal: indicators.includes("macd") ? macdSignal : undefined,
-            atrPeriod: indicators.includes("atr") ? atrPeriod : undefined,
-            bbPeriod: indicators.includes("bollingerBands") ? bbPeriod : undefined,
-            bbStdDev: indicators.includes("bollingerBands") ? bbStdDev : undefined,
-            emaPeriod: indicators.includes("ema") ? emaPeriod : undefined,
+          symbol: coin,
+          interval,
+          dataRange: {
+            from: firstCandle?.timestampIso ?? null,
+            to: lastCandle?.timestampIso ?? null,
+            candleCount: candles.length,
+          },
+          indicators: {
+            ...(indicators.includes("rsi") && { rsi: { period: rsiPeriod, rsiSmaLength: RSI_SMA_LENGTH } }),
+            ...(indicators.includes("macd") && {
+              macd: { fast: macdFast, slow: macdSlow, signal: macdSignal },
+            }),
+            ...(indicators.includes("atr") && { atr: { period: atrPeriod } }),
+            ...(indicators.includes("bollingerBands") && {
+              bb: { period: bbPeriod, stdDev: bbStdDev },
+            }),
+            ...(indicators.includes("ema") && { ema: { period: emaPeriod } }),
+            ...(indicators.includes("sma") && { sma: { period: smaPeriod } }),
+            ...(indicators.includes("vwap") && { vwap: {} }),
           },
         }
       : undefined;
@@ -713,23 +879,9 @@ export const hyperliquidApiTools: SdkToolDefinition[] = [
       toContent(await getSpotAccountSummary(args, getRequestContext())),
   },
   {
-    name: "get_candle_snapshot",
-    title: "Get Candle Snapshot",
-    description: "Retrieve the last N candlesticks (OHLCV) for a coin. Default 10, max 30.",
-    inputSchema: {
-      coin: coinSchema,
-      interval: candleIntervalSchema,
-      count: candleCountSchema.describe(
-        `Optional number of candles to return (allowed: 1 to ${MAX_CANDLE_COUNT}, default: ${DEFAULT_CANDLE_COUNT}).`
-      ),
-    },
-    handler: async (args, _extra) =>
-      toContent(await getCandleSnapshot(args, getRequestContext())),
-  },
-  {
-    name: "get_candle_snapshot_with_indicators",
-    title: "Get Candle Snapshot with Indicators",
-    description: "Retrieve the last N candles with optional indicators: RSI, MACD, ATR, Bollinger Bands, EMA.",
+    name: "get_market_data",
+    title: "Get Market Data",
+    description: "Retrieve the last N candles (OHLCV) for a coin and interval, with optional indicators: RSI, MACD, ATR, Bollinger Bands, EMA, SMA, VWAP.",
     inputSchema: {
       coin: coinSchema,
       interval: candleIntervalSchema,
@@ -745,6 +897,7 @@ export const hyperliquidApiTools: SdkToolDefinition[] = [
       bbPeriod: bbPeriodSchema,
       bbStdDev: bbStdDevSchema,
       emaPeriod: emaPeriodSchema,
+      smaPeriod: smaPeriodSchema,
     },
     handler: async (args, _extra) =>
       toContent(await getCandleSnapshotWithIndicators(args, getRequestContext())),
