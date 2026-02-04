@@ -210,27 +210,33 @@ async function getSubscriptionSnapshot<T>(
  * Retrieve mid price for a single coin.
  * Uses the Hyperliquid REST info endpoint (allMids) for low latency.
  * If the book is empty, the last trade price will be used as a fallback.
+ * Coin may be "SYMBOL" or "dex:SYMBOL"; when "dex:SYMBOL" is used, the dex part is passed to allMids.
  */
 async function getCoinPrice(
   args: Record<string, unknown>,
   _context?: { apiKey?: string; userId?: string }
 ): Promise<string> {
-  const coin = requireField(args?.coin, coinSchema, "coin", COIN_HINT);
+  const rawCoin = requireField(args?.coin, coinSchema, "coin", COIN_HINT);
+  const dexColonIndex = rawCoin.indexOf(":");
+  const dex: string | undefined =
+    dexColonIndex >= 0 ? rawCoin.slice(0, dexColonIndex) : undefined;
+  const coin = dexColonIndex >= 0 ? rawCoin.slice(dexColonIndex + 1) : rawCoin;
+  const key = coin.toUpperCase();
+
   try {
-    const mids = await infoClient.allMids();
-    const key = coin.toUpperCase();
+    const mids = await infoClient.allMids(dex !== undefined ? { dex } : undefined);
     const mid = mids[key];
     if (mid === undefined) {
       const available = Object.keys(mids).slice(0, 10).join(", ");
       throw new Error(
-        `Coin '${coin}' not found. Available coins include: ${available}...`
+        `Coin '${rawCoin}' not found. Available coins include: ${available}...`
       );
     }
-    return JSON.stringify({ [coin]: mid }, null, 2);
+    return JSON.stringify({ [rawCoin]: mid }, null, 2);
   } catch (error) {
     const errorMessage =
       error instanceof Error ? error.message : String(error);
-    throw new Error(`Failed to retrieve mid for ${coin}: ${errorMessage}`);
+    throw new Error(`Failed to retrieve mid for ${rawCoin}: ${errorMessage}`);
   }
 }
 
