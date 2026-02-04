@@ -701,7 +701,7 @@ export const katoshiTradingTools: SdkToolDefinition[] = [
   {
     name: "close_all",
     title: "Close All",
-    description: "Close all open positions. Optionally filter by coins, direction (is_buy), size_pct, or dexs.",
+    description: "Close all open perpetuals positions. Optionally filter by coins, direction (is_buy), size_pct, or dexs.",
     inputSchema: {
       bot_id: botIdSchema,
       coins: optionalStringArray("Optional: limit to these coins (e.g. ['BTC','ETH']). Use null or omit for all. Do not send [] or 0."),
@@ -714,7 +714,7 @@ export const katoshiTradingTools: SdkToolDefinition[] = [
   {
     name: "sell_all",
     title: "Sell All",
-    description: "Sell (liquidate) all positions. Optionally filter by coins or size_pct.",
+    description: "Sell (liquidate) all spot assets. Optionally filter by coins or size_pct.",
     inputSchema: {
       bot_id: botIdSchema,
       coins: optionalStringArray("Optional: limit to these coins. Use null or omit for all. Do not send [] or 0."),
@@ -725,7 +725,7 @@ export const katoshiTradingTools: SdkToolDefinition[] = [
   {
     name: "clear_all",
     title: "Clear All",
-    description: "Close all positions and cancel all orders. Optionally filter by coins or dexs.",
+    description: "Close all perpetuals positions and cancel all orders. Optionally filter by coins or dexs.",
     inputSchema: {
       bot_id: botIdSchema,
       coins: optionalStringArray("Optional: limit to these coins. Use null or omit for all. Do not send [] or 0."),

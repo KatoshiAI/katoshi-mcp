@@ -622,6 +622,150 @@ async function fetchCandlesForIndicators(
   return raw as CandleRow[];
 }
 
+const DEFAULT_PIVOT_LEFT = 10;
+const DEFAULT_PIVOT_RIGHT = 5;
+const PIVOT_CANDLE_COUNT = 300;
+const PIVOT_MAX_RECENT = 5;
+
+type PivotPoint = {
+  timestamp: number;
+  timestampIso: string;
+  barsAgo: number;
+  price: number;
+  pctFromCurrentClose: number;
+};
+
+/**
+ * Compute pivot highs and pivot lows from OHLC arrays.
+ * A pivot high at index i: high[i] is the max of high[i-left]..high[i+right].
+ * A pivot low at index i: low[i] is the min of low[i-left]..low[i+right].
+ * Only includes pivots that have not been cleared: no candle after the pivot bar
+ * has broken the level (high >= pivot high price, or low <= pivot low price).
+ * Candles are ordered oldest-first; "current" is the last candle (index n-1).
+ */
+function computePivots(
+  raw: CandleRow[],
+  left: number,
+  right: number,
+  currentClose: number
+): { pivotHighs: PivotPoint[]; pivotLows: PivotPoint[] } {
+  const n = raw.length;
+  const high = raw.map((c) => parseDecimal(c.h));
+  const low = raw.map((c) => parseDecimal(c.l));
+  const pivotHighs: PivotPoint[] = [];
+  const pivotLows: PivotPoint[] = [];
+
+  for (let i = left; i < n - right; i++) {
+    let isPivotHigh = true;
+    let isPivotLow = true;
+    const hi = high[i];
+    const li = low[i];
+
+    for (let j = i - left; j <= i + right; j++) {
+      if (j === i) continue;
+      if (high[j] > hi) isPivotHigh = false;
+      if (low[j] < li) isPivotLow = false;
+      if (!isPivotHigh && !isPivotLow) break;
+    }
+
+    const barsAgo = n - 1 - i;
+    const pctFromClose = currentClose !== 0
+      ? Math.round((hi - currentClose) / currentClose * 10000) / 100
+      : 0;
+    const pctFromCloseLow = currentClose !== 0
+      ? Math.round((li - currentClose) / currentClose * 10000) / 100
+      : 0;
+
+    // Not cleared: no candle after this pivot has broken the level (high above pivot high, low below pivot low)
+    let pivotHighNotCleared = true;
+    let pivotLowNotCleared = true;
+    for (let j = i + 1; j < n; j++) {
+      if (high[j] >= hi) pivotHighNotCleared = false;
+      if (low[j] <= li) pivotLowNotCleared = false;
+      if (!pivotHighNotCleared && !pivotLowNotCleared) break;
+    }
+
+    if (isPivotHigh && pivotHighNotCleared) {
+      pivotHighs.push({
+        timestamp: raw[i].T,
+        timestampIso: new Date(raw[i].T).toISOString(),
+        barsAgo,
+        price: hi,
+        pctFromCurrentClose: pctFromClose,
+      });
+    }
+    if (isPivotLow && pivotLowNotCleared) {
+      pivotLows.push({
+        timestamp: raw[i].T,
+        timestampIso: new Date(raw[i].T).toISOString(),
+        barsAgo,
+        price: li,
+        pctFromCurrentClose: pctFromCloseLow,
+      });
+    }
+  }
+
+  return { pivotHighs, pivotLows };
+}
+
+/**
+ * Fetch 300 candles and return up to 5 most recent pivot highs (resistance) and pivot lows (support)
+ * that have not been cleared. A pivot high is cleared if any later candle's high >= its price;
+ * a pivot low is cleared if any later candle's low <= its price.
+ */
+export async function getPivotHighsAndLows(
+  args: Record<string, unknown>,
+  _context?: { apiKey?: string; userId?: string }
+): Promise<string> {
+  const coin = requireField(args?.coin, coinSchema, "coin", COIN_HINT);
+  const interval = requireField(
+    args?.interval,
+    candleIntervalSchema,
+    "interval",
+    INTERVAL_HINT
+  );
+  const leftBars = DEFAULT_PIVOT_LEFT;
+  const rightBars = DEFAULT_PIVOT_RIGHT;
+
+  try {
+    const raw = await fetchCandlesForIndicators(coin, interval, PIVOT_CANDLE_COUNT, 0);
+    const n = raw.length;
+    if (n === 0) {
+      return JSON.stringify(
+        { pivotHighs: [], pivotLows: [], message: "No candle data returned." },
+        null,
+        2
+      );
+    }
+
+    const currentClose = parseDecimal(raw[n - 1].c);
+    const currentHigh = parseDecimal(raw[n - 1].h);
+    const currentLow = parseDecimal(raw[n - 1].l);
+    const { pivotHighs, pivotLows } = computePivots(raw, leftBars, rightBars, currentClose);
+    // Only pivots above current high (resistance) or below current low (support), then take 5 most recent
+    const filteredHighs = pivotHighs.filter((p) => p.price > currentHigh).slice(-PIVOT_MAX_RECENT);
+    const filteredLows = pivotLows.filter((p) => p.price < currentLow).slice(-PIVOT_MAX_RECENT);
+
+    return JSON.stringify(
+      {
+        coin,
+        interval,
+        currentClose,
+        currentHigh,
+        currentLow,
+        pivotHighs: filteredHighs,
+        pivotLows: filteredLows,
+      },
+      null,
+      2
+    );
+  } catch (error) {
+    const errorMessage =
+      error instanceof Error ? error.message : String(error);
+    throw new Error(`Failed to get pivot highs/lows for ${coin}: ${errorMessage}`);
+  }
+}
+
 /**
  * Retrieve candle snapshot with optional technical indicators (RSI, MACD, ATR, Bollinger Bands).
  * Fetches enough candles for indicator warmup, computes selected indicators, returns last N candles with values.
@@ -1036,7 +1180,7 @@ export const hyperliquidApiTools: SdkToolDefinition[] = [
   {
     name: "get_market_data",
     title: "Get Market Data",
-    description: "Retrieve the last N candles (OHLCV) for a coin and interval, with optional indicators: RSI, MACD, ATR, Bollinger Bands, EMA, SMA, VWAP.",
+    description: "Retrieve last N candles (OHLCV) for a coin and interval, with optional indicators: RSI, MACD, ATR, Bollinger Bands, EMA, SMA, VWAP.",
     inputSchema: {
       coin: coinSchema,
       interval: candleIntervalSchema,
@@ -1056,6 +1200,17 @@ export const hyperliquidApiTools: SdkToolDefinition[] = [
     },
     handler: async (args, _extra) =>
       toContent(await getCandleSnapshotWithIndicators(args, getRequestContext())),
+  },
+  {
+    name: "get_pivot_highs_and_lows",
+    title: "Get Pivot Highs and Lows",
+    description: "Retrieve recent uncleared pivot highs (resistance) and pivot lows (support) for a coin and interval.",
+    inputSchema: {
+      coin: coinSchema,
+      interval: candleIntervalSchema,
+    },
+    handler: async (args, _extra) =>
+      toContent(await getPivotHighsAndLows(args, getRequestContext())),
   },
   {
     name: "get_coin_leverage_and_limits",
