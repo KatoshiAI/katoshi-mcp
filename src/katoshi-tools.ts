@@ -39,6 +39,7 @@ const TPSL_HINT = "Provide at least one of: sl_pct, tp_pct, sl, tp.";
 const optionalNumber = (description: string) => z.number().nullish().describe(description);
 const optionalBoolean = (description: string) => z.union([z.boolean(), z.null()]).optional().describe(description);
 const optionalStringArray = (description: string) => z.union([z.array(z.string()), z.null()]).optional().describe(description);
+const optionalIntArray = (description: string) => z.union([z.array(z.number().int()), z.null()]).optional().describe(description);
 
 const botIdSchema = z.union([z.number(), z.string()]).describe("The bot ID to execute the action for (number or string, e.g. 640 or '640'). Sent as integer to the API.");
 const coinSchema = z.string().describe("The coin symbol (e.g., 'BTC', 'ETH', 'SOL')");
@@ -97,6 +98,13 @@ function asBoolean(v: unknown): boolean | undefined {
 function asStringArray(v: unknown): string[] | undefined {
   if (!Array.isArray(v)) return undefined;
   const out = v.filter((x): x is string => typeof x === "string");
+  return out.length > 0 ? out : undefined;
+}
+
+/** Coerce to number[] (integers) only when value is an array of numbers; otherwise undefined (avoids sending null/empty by mistake). */
+function asIntArray(v: unknown): number[] | undefined {
+  if (!Array.isArray(v)) return undefined;
+  const out = v.map((x) => (typeof x === "number" && Number.isInteger(x) ? x : Math.trunc(Number(x)))).filter((n) => !Number.isNaN(n));
   return out.length > 0 ? out : undefined;
 }
 
@@ -222,7 +230,7 @@ async function executeAction(
   const isAdd = asBoolean(argsNorm.is_add);
   if (isAdd !== undefined) payload.is_add = isAdd;
   setIfValid(payload, "order_id", argsNorm.order_id);
-  const orderIds = asStringArray(argsNorm.order_ids);
+  const orderIds = asIntArray(argsNorm.order_ids);
   if (orderIds !== undefined) payload.order_ids = orderIds;
   const dexs = asStringArray(argsNorm.dexs);
   if (dexs !== undefined) payload.dexs = dexs;
@@ -694,7 +702,7 @@ export const katoshiTradingTools: SdkToolDefinition[] = [
     inputSchema: {
       bot_id: botIdSchema,
       coin: coinSchema,
-      order_ids: optionalStringArray("Optional: specific order IDs to cancel. Use null or omit to cancel all resting orders for the coin. Do not send [] or 0."),
+      order_ids: optionalIntArray("Optional: specific order IDs to cancel (integers). Use null or omit to cancel all resting orders for the coin. Do not send [] or 0."),
     },
     handler: async (args, _extra) => toContent(await cancelOrder(args, getRequestContext())),
   },
@@ -740,7 +748,7 @@ export const katoshiTradingTools: SdkToolDefinition[] = [
     inputSchema: {
       bot_id: botIdSchema,
       coins: optionalStringArray("Optional: limit to these coins. Use null or omit for all. Do not send [] or 0."),
-      order_ids: optionalStringArray("Optional: cancel only these order IDs. Use null or omit for all. Do not send [] or 0."),
+      order_ids: optionalIntArray("Optional: cancel only these order IDs (integers). Use null or omit for all. Do not send [] or 0."),
       dexs: optionalStringArray("Optional: limit to these DEXs. Use null or omit for all. Do not send [] or 0."),
     },
     handler: async (args, _extra) => toContent(await cancelAll(args, getRequestContext())),
