@@ -896,6 +896,7 @@ export async function getCandleSnapshotWithIndicators(
       const closeN = parseDecimal(c.c);
       const volumeN = parseDecimal(c.v);
       const timestampIso = new Date(c.T).toISOString();
+      const barsAgo = count - 1 - i; // 0 = most recent bar in the snapshot
 
       const prevCandle = globalIndex > 0 ? raw[globalIndex - 1] : undefined;
       const prevClose = prevCandle != null ? parseDecimal(prevCandle.c) : null;
@@ -911,6 +912,7 @@ export async function getCandleSnapshotWithIndicators(
       const row: Record<string, unknown> = {
         timestamp: c.T,
         timestampIso,
+        barsAgo,
         candleType: getCandleType(openN, highN, lowN, closeN),
         priceChange: priceChange ?? null,
         priceChangePct: priceChangePct ?? null,

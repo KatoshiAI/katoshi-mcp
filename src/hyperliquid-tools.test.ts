@@ -49,10 +49,10 @@ describe("getPivotHighsAndLows", () => {
 describe("get_market_data (getCandleSnapshotWithIndicators)", () => {
   it("returns same response as tool would to an agent", async () => {
     const result = await getCandleSnapshotWithIndicators({
-      coin: "BTC",
-      interval: "1h",
-      count: 3,
-      indicators: ["rsi", "macd", "atr", "bollingerBands", "ema", "sma"],
+      coin: "HYPE",
+      interval: "30m",
+      count: 15,
+      indicators: ["macd"],
     });
     assert.strictEqual(typeof result, "string");
     assert(result.length > 0);
