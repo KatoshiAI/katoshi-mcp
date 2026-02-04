@@ -208,10 +208,8 @@ async function getSubscriptionSnapshot<T>(
 
 /**
  * Retrieve mid price for a single coin.
- * Uses the Hyperliquid SDK WebSocket (SubscriptionClient allMids) via
- * getSubscriptionSnapshot: subscribe, wait for the first event, unsubscribe,
- * then return the requested coin's mid.
- * Note: If the book is empty, the last trade price will be used as a fallback.
+ * Uses the Hyperliquid REST info endpoint (allMids) for low latency.
+ * If the book is empty, the last trade price will be used as a fallback.
  */
 async function getCoinPrice(
   args: Record<string, unknown>,
@@ -219,11 +217,9 @@ async function getCoinPrice(
 ): Promise<string> {
   const coin = requireField(args?.coin, coinSchema, "coin", COIN_HINT);
   try {
-    const event = await getSubscriptionSnapshot<{ mids: Record<string, string> }>(
-      (client, onData) => client.allMids({ dex: "ALL_DEXS" }, onData)
-    );
-    const mids = event.mids;
-    const mid = mids[coin] ?? mids[coin.toUpperCase()];
+    const mids = await infoClient.allMids();
+    const key = coin.toUpperCase();
+    const mid = mids[key];
     if (mid === undefined) {
       const available = Object.keys(mids).slice(0, 10).join(", ");
       throw new Error(
