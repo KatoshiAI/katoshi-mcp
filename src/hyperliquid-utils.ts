@@ -11,7 +11,7 @@ import { z } from "zod";
 const DEFAULT_WS_TIMEOUT_MS = 3_000;
 const DEFAULT_WS_TIMEOUT_MESSAGE = "WebSocket subscription timeout";
 const DEFAULT_INDICATOR_LOOKBACK = 50;
-const RSI_SMA_LENGTH = 14;
+const OBV_SMA_LENGTH = 14;
 
 /**
  * Validate a single field with a Zod schema and throw a normalized error.
@@ -435,6 +435,7 @@ export function getRequiredIndicatorLookback(
   indicators: string[] | null,
   periods: {
     rsiPeriod: number;
+    rsiSmaLength: number;
     macdSlow: number;
     macdSignal: number;
     atrPeriod: number;
@@ -448,7 +449,7 @@ export function getRequiredIndicatorLookback(
   if (indicators.includes("rsi"))
     lookback = Math.max(
       lookback,
-      periods.rsiPeriod + RSI_SMA_LENGTH + (RSI_SMA_LENGTH - 1)
+      periods.rsiPeriod + periods.rsiSmaLength + (periods.rsiSmaLength - 1)
     );
   if (indicators.includes("macd"))
     lookback = Math.max(lookback, periods.macdSlow + periods.macdSignal);
@@ -461,6 +462,7 @@ export function getRequiredIndicatorLookback(
   if (indicators.includes("sma"))
     lookback = Math.max(lookback, periods.smaPeriod);
   if (indicators.includes("vwap")) lookback = Math.max(lookback, 1);
+  if (indicators.includes("obv")) lookback = Math.max(lookback, OBV_SMA_LENGTH);
   return lookback || DEFAULT_INDICATOR_LOOKBACK;
 }
 

@@ -36,6 +36,16 @@ describe("get_market_data (getCandleSnapshotWithIndicators)", () => {
     });
     console.log(result);
   });
+
+  it("returns OBV values when requested", async () => {
+    const result = await getCandleSnapshotWithIndicators({
+      coin: "HYPE",
+      interval: "30m",
+      count: 15,
+      indicators: ["obv"],
+    });
+    console.log(result);
+  });
 });
 
 describe("getPortfolioOverview", () => {

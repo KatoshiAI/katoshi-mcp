@@ -2,7 +2,7 @@ import {
   HttpTransport,
   InfoClient,
 } from "@nktkas/hyperliquid";
-import { ATR, BollingerBands, EMA, MACD, RSI, SMA, VWAP } from "technicalindicators";
+import { ATR, BollingerBands, EMA, MACD, OBV, RSI, SMA, VWAP } from "technicalindicators";
 // technicalindicators – available exports (revisit for more tools):
 // Moving averages: SMA, EMA, WMA, WEMA, MACD
 // Oscillators: RSI, CCI, AwesomeOscillator
@@ -79,7 +79,8 @@ const PIVOT_MAX_RECENT = 5;
 
 /** Default periods for indicators (standard defaults). */
 const DEFAULT_RSI_PERIOD = 14;
-const RSI_SMA_LENGTH = 14;
+const DEFAULT_RSI_SMA_LENGTH = 14;
+const OBV_SMA_LENGTH = 14;
 const DEFAULT_MACD_FAST = 12;
 const DEFAULT_MACD_SLOW = 26;
 const DEFAULT_MACD_SIGNAL = 9;
@@ -131,16 +132,17 @@ const orderbookDepthSchema = z
   .describe("Optional number of bid/ask levels to return per side (1-50, default 20).");
 
 const indicatorNameSchema = z
-  .enum(["rsi", "macd", "atr", "bollingerBands", "ema", "sma", "vwap"])
-  .describe("Indicator: rsi, macd, atr, bollingerBands, ema, sma, vwap");
+  .enum(["rsi", "macd", "atr", "bollingerBands", "ema", "sma", "vwap", "obv"])
+  .describe("Indicator: rsi, macd, atr, bollingerBands, ema, sma, vwap, obv");
 const indicatorsSchema = z
   .array(indicatorNameSchema)
   .min(1)
-  .max(7)
+  .max(8)
   .optional()
-  .describe("Optional list of indicators to compute (rsi, macd, atr, bollingerBands, ema, sma, vwap).");
+  .describe("Optional list of indicators to compute (rsi, macd, atr, bollingerBands, ema, sma, vwap, obv).");
 
 const rsiPeriodSchema = z.number().int().min(2).max(30).nullish().describe("RSI period (default 14).");
+const rsiSmaLengthSchema = z.number().int().min(2).max(50).nullish().describe("RSI SMA length (default 14).");
 const macdFastPeriodSchema = z.number().int().min(2).max(20).nullish().describe("MACD fast period (default 12).");
 const macdSlowPeriodSchema = z.number().int().min(5).max(50).nullish().describe("MACD slow period (default 26).");
 const macdSignalPeriodSchema = z.number().int().min(2).max(20).nullish().describe("MACD signal period (default 9).");
@@ -974,7 +976,7 @@ export async function getPivotHighsAndLows(
 }
 
 /**
- * Retrieve candle snapshot with optional technical indicators (RSI, MACD, ATR, Bollinger Bands).
+ * Retrieve candle snapshot with optional technical indicators (RSI, MACD, ATR, Bollinger Bands, EMA, SMA, VWAP, OBV).
  * Fetches enough candles for indicator warmup, computes selected indicators, returns last N candles with values.
  */
 export async function getCandleSnapshotWithIndicators(
@@ -999,6 +1001,7 @@ export async function getCandleSnapshotWithIndicators(
     : null;
 
   const rsiPeriod = Math.min(30, Math.max(2, Number(args?.rsiPeriod) || DEFAULT_RSI_PERIOD));
+  const rsiSmaLength = Math.min(50, Math.max(2, Number(args?.rsiSmaLength) || DEFAULT_RSI_SMA_LENGTH));
   const macdFast = Math.min(20, Math.max(2, Number(args?.macdFastPeriod) || DEFAULT_MACD_FAST));
   const macdSlow = Math.min(50, Math.max(5, Number(args?.macdSlowPeriod) || DEFAULT_MACD_SLOW));
   const macdSignal = Math.min(20, Math.max(2, Number(args?.macdSignalPeriod) || DEFAULT_MACD_SIGNAL));
@@ -1010,6 +1013,7 @@ export async function getCandleSnapshotWithIndicators(
 
   const lookback = getRequiredIndicatorLookback(indicators ?? null, {
     rsiPeriod,
+    rsiSmaLength,
     macdSlow,
     macdSignal,
     atrPeriod,
@@ -1039,20 +1043,22 @@ export async function getCandleSnapshotWithIndicators(
       ema?: number[];
       sma?: number[];
       vwap?: number[];
+      obv?: (number | undefined)[];
+      obvSma?: (number | undefined)[];
     };
     const results: IndicatorResults = {};
 
     if (indicators?.includes("rsi")) {
       const rsiResult = RSI.calculate({ values: close, period: rsiPeriod });
       results.rsi = rsiResult.map((v) => (Number.isFinite(v) ? v : undefined));
-      // 14-period SMA of RSI via library (for rsiSma value and RSI vs RSI-SMA crossover)
+      // SMA of RSI via library (for rsiSma value and RSI vs RSI-SMA crossover)
       const from = rsiPeriod; // RSI has values from this index onward
       const rsiSlice = results.rsi!.slice(from) as number[];
       const smaResult =
-        rsiSlice.length >= RSI_SMA_LENGTH
-          ? SMA.calculate({ period: RSI_SMA_LENGTH, values: rsiSlice })
+        rsiSlice.length >= rsiSmaLength
+          ? SMA.calculate({ period: rsiSmaLength, values: rsiSlice })
           : [];
-      const pad = from + RSI_SMA_LENGTH - 1;
+      const pad = from + rsiSmaLength - 1;
       results.rsiSma = [
         ...Array.from<undefined>({ length: pad }).fill(undefined),
         ...smaResult,
@@ -1089,6 +1095,20 @@ export async function getCandleSnapshotWithIndicators(
     }
     if (indicators?.includes("vwap")) {
       results.vwap = VWAP.calculate({ high, low, close, volume });
+    }
+    if (indicators?.includes("obv")) {
+      const obvResult = OBV.calculate({ close, volume });
+      results.obv = obvResult.map((v) => (Number.isFinite(v) ? v : undefined));
+      const obvSlice = results.obv as number[];
+      const obvSmaResult =
+        obvSlice.length >= OBV_SMA_LENGTH
+          ? SMA.calculate({ period: OBV_SMA_LENGTH, values: obvSlice })
+          : [];
+      const pad = OBV_SMA_LENGTH - 1;
+      results.obvSma = [
+        ...Array.from<undefined>({ length: pad }).fill(undefined),
+        ...obvSmaResult,
+      ];
     }
 
     /** Index into indicator result array for candle at globalIndex (results may be shorter due to warmup). */
@@ -1261,6 +1281,41 @@ export async function getCandleSnapshotWithIndicators(
           hasIndicators = true;
         }
       }
+      if (results.obv?.length) {
+        const ri = idx(results.obv, globalIndex);
+        const val = ri >= 0 ? results.obv[ri] : undefined;
+        const obvSmaVal = results.obvSma && ri >= 0 ? results.obvSma[ri] : undefined;
+        const prevRi = idx(results.obv, globalIndex - 1);
+        const prevVal = prevRi >= 0 ? results.obv[prevRi] : undefined;
+        const prevObvSmaRi = results.obvSma ? idx(results.obvSma, globalIndex - 1) : -1;
+        const prevObvSmaVal = prevObvSmaRi >= 0 ? results.obvSma![prevObvSmaRi] : undefined;
+        if (val != null && Number.isFinite(val)) {
+          let obvCrossover: "bullish" | "bearish" | null = null;
+          if (
+            prevVal != null && Number.isFinite(prevVal) &&
+            prevObvSmaVal != null && Number.isFinite(prevObvSmaVal) &&
+            obvSmaVal != null && Number.isFinite(obvSmaVal)
+          ) {
+            if (prevVal < prevObvSmaVal && val > obvSmaVal) obvCrossover = "bullish";
+            else if (prevVal > prevObvSmaVal && val < obvSmaVal) obvCrossover = "bearish";
+          }
+          const trend: "bullish" | "bearish" | "neutral" =
+            obvSmaVal != null && Number.isFinite(obvSmaVal)
+              ? val > obvSmaVal
+                ? "bullish"
+                : val < obvSmaVal
+                  ? "bearish"
+                  : "neutral"
+              : "neutral";
+          ind.obv = {
+            value: val,
+            obvSma: obvSmaVal != null && Number.isFinite(obvSmaVal) ? obvSmaVal : null,
+            trend,
+            crossover: obvCrossover ?? null,
+          };
+          hasIndicators = true;
+        }
+      }
       if (hasIndicators) row.indicators = ind;
       return row;
     });
@@ -1278,7 +1333,7 @@ export async function getCandleSnapshotWithIndicators(
             candleCount: candles.length,
           },
           indicators: {
-            ...(indicators.includes("rsi") && { rsi: { period: rsiPeriod, rsiSmaLength: RSI_SMA_LENGTH } }),
+            ...(indicators.includes("rsi") && { rsi: { period: rsiPeriod, rsiSmaLength } }),
             ...(indicators.includes("macd") && {
               macd: { fast: macdFast, slow: macdSlow, signal: macdSignal },
             }),
@@ -1289,6 +1344,7 @@ export async function getCandleSnapshotWithIndicators(
             ...(indicators.includes("ema") && { ema: { period: emaPeriod } }),
             ...(indicators.includes("sma") && { sma: { period: smaPeriod } }),
             ...(indicators.includes("vwap") && { vwap: {} }),
+            ...(indicators.includes("obv") && { obv: { obvSmaLength: OBV_SMA_LENGTH } }),
           },
         }
       : undefined;
@@ -1438,7 +1494,7 @@ export const hyperliquidApiTools: SdkToolDefinition[] = [
   {
     name: "get_market_data",
     title: "Get Market Data",
-    description: "Retrieve last N candles (OHLCV) for a coin and interval, with optional indicators: RSI, MACD, ATR, Bollinger Bands, EMA, SMA, VWAP.",
+    description: "Retrieve last N candles (OHLCV) for a coin and interval, with optional indicators: RSI, MACD, ATR, Bollinger Bands, EMA, SMA, VWAP, OBV.",
     inputSchema: {
       coin: coinSchema,
       interval: candleIntervalSchema,
@@ -1447,6 +1503,7 @@ export const hyperliquidApiTools: SdkToolDefinition[] = [
       ),
       indicators: indicatorsSchema,
       rsiPeriod: rsiPeriodSchema,
+      rsiSmaLength: rsiSmaLengthSchema,
       macdFastPeriod: macdFastPeriodSchema,
       macdSlowPeriod: macdSlowPeriodSchema,
       macdSignalPeriod: macdSignalPeriodSchema,
