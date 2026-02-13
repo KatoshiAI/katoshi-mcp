@@ -1,5 +1,6 @@
 import { describe, it } from "node:test";
 import {
+  getAccountOverview,
   getPerpsAccountSummary,
   getCandleSnapshotWithIndicators,
   getPivotHighsAndLows,
@@ -40,6 +41,13 @@ describe("get_market_data (getCandleSnapshotWithIndicators)", () => {
 describe("getPortfolioOverview", () => {
   it("returns same response as tool would to an agent", async () => {
     const result = await getPortfolioOverview({ user: TEST_USER });
+    console.log(result);
+  });
+});
+
+describe("getAccountOverview", () => {
+  it("returns compact account overview for an agent", async () => {
+    const result = await getAccountOverview({ user: TEST_USER });
     console.log(result);
   });
 });

@@ -1,8 +1,6 @@
 import {
   HttpTransport,
   InfoClient,
-  SubscriptionClient,
-  WebSocketTransport,
 } from "@nktkas/hyperliquid";
 import { ATR, BollingerBands, EMA, MACD, RSI, SMA, VWAP } from "technicalindicators";
 // technicalindicators – available exports (revisit for more tools):
@@ -18,6 +16,20 @@ import { ATR, BollingerBands, EMA, MACD, RSI, SMA, VWAP } from "technicalindicat
 import { z } from "zod";
 import { getRequestContext } from "./request-context.js";
 import { toContent, type SdkToolDefinition } from "./tool-common.js";
+import {
+  computePivots,
+  formatOpenOrders,
+  formatPortfolioOverview,
+  formatPerpsSummary,
+  formatSpotSummary,
+  formatUserFills,
+  getCandleType,
+  getRequiredIndicatorLookback,
+  getSubscriptionSnapshot,
+  parseDecimal,
+  requireField,
+  type CandleRow,
+} from "./hyperliquid-utils.js";
 
 /**
  * Hyperliquid API tools
@@ -52,23 +64,47 @@ const INTERVAL_MS: Record<z.infer<typeof candleIntervalSchema>, number> = {
 
 const DEFAULT_CANDLE_COUNT = 10;
 const MAX_CANDLE_COUNT = 30;
-/** Fallback lookback when no indicators requested (keeps one fetch path). */
-const DEFAULT_INDICATOR_LOOKBACK = 50;
 /** Hardcap: max candles we may fetch for indicator warmup (e.g. EMA 200 + count). */
 const MAX_CANDLES_FOR_INDICATORS = 500;
-
-const DEFAULT_WS_TIMEOUT_MS = 3_000;
-const DEFAULT_WS_TIMEOUT_MESSAGE = "WebSocket subscription timeout";
 
 const COIN_HINT = "Provide coin (e.g. BTC, ETH).";
 const USER_HINT = "Provide user (wallet address, e.g. 0x...).";
 const INTERVAL_HINT = "Use one of: 1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 8h, 12h, 1d, 3d, 1w, 1M.";
+
+const DEFAULT_PIVOT_LEFT = 10;
+const DEFAULT_PIVOT_RIGHT = 5;
+const PIVOT_CANDLE_COUNT = 300;
+const PIVOT_MAX_RECENT = 5;
+
+/** Default periods for indicators (standard defaults). */
+const DEFAULT_RSI_PERIOD = 14;
+const RSI_SMA_LENGTH = 14;
+const DEFAULT_MACD_FAST = 12;
+const DEFAULT_MACD_SLOW = 26;
+const DEFAULT_MACD_SIGNAL = 9;
+const DEFAULT_ATR_PERIOD = 14;
+const DEFAULT_BB_PERIOD = 20;
+const DEFAULT_BB_STDDEV = 2;
+const DEFAULT_EMA_PERIOD = 20;
+const DEFAULT_SMA_PERIOD = 20;
 
 // ---------------------------------------------------------------------------
 // Schemas
 // ---------------------------------------------------------------------------
 
 const coinSchema = z.string().describe("Asset symbol (e.g. BTC, ETH).");
+const coinsSchema = z
+  .array(coinSchema)
+  .min(1)
+  .max(50)
+  .describe("List of asset symbols (or dex-prefixed symbols like dex:BTC).");
+const tradeHistoryLimitSchema = z
+  .number()
+  .int()
+  .min(1)
+  .max(50)
+  .nullish()
+  .describe("Maximum number of most recent fills to return (1-50, default 10).");
 const userSchema = z.string().transform((s) => s.toLowerCase()).describe("The user's hyperliquid wallet address (e.g. 0x...).");
 const candleIntervalSchema = z.enum(["1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "8h", "12h", "1d", "3d", "1w", "1M"]).describe("Candle interval (Allowed: 1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 8h, 12h, 1d, 3d, 1w, 1M).");
 const candleCountSchema = z.number().int().min(1).max(MAX_CANDLE_COUNT).nullish();
@@ -94,149 +130,70 @@ const emaPeriodSchema = z.number().int().min(2).max(200).nullish().describe("EMA
 const smaPeriodSchema = z.number().int().min(2).max(200).nullish().describe("SMA period (default 20, max 200).");
 
 // ---------------------------------------------------------------------------
-// Utils
-// ---------------------------------------------------------------------------
-
-/**
- * Validate a single field with a Zod schema and throw in the same format as katoshi-tools:
- * "Invalid or missing {fieldName}: {schema error}. {hint}"
- */
-function requireField<T>(
-  value: unknown,
-  schema: z.ZodType<T>,
-  fieldName: string,
-  hint: string
-): T {
-  const parsed = schema.safeParse(value);
-  if (!parsed.success) {
-    throw new Error(
-      `Invalid or missing ${fieldName}: ${parsed.error.message}. ${hint}`
-    );
-  }
-  return parsed.data;
-}
-
-/** Parse decimal string from API to number. */
-function parseDecimal(s: string | undefined): number {
-  if (s === undefined || s === "") return 0;
-  const n = Number(s);
-  return Number.isFinite(n) ? n : 0;
-}
-
-/** Classify single-candle shape from OHLC (doji, hammer, inverted_hammer, bullish, bearish). */
-function getCandleType(open: number, high: number, low: number, close: number): string {
-  const range = high - low;
-  if (range <= 0 || !Number.isFinite(range)) return "doji";
-  const body = Math.abs(close - open);
-  const bodyRatio = body / range;
-  const upperWick = high - Math.max(open, close);
-  const lowerWick = Math.min(open, close) - low;
-  const minBody = range * 0.02;
-
-  if (bodyRatio < 0.1) return "doji";
-  if (lowerWick >= 2 * body && upperWick <= Math.max(minBody, body * 0.5)) return "hammer";
-  if (upperWick >= 2 * body && lowerWick <= Math.max(minBody, body * 0.5)) return "inverted_hammer";
-  return close >= open ? "bullish" : "bearish";
-}
-
-/** Format number to string with up to 6 decimal places, no trailing zeros. */
-function formatDecimal(n: number): string {
-  if (!Number.isFinite(n)) return "0";
-  return Number(n.toFixed(6)) === n ? String(n) : n.toFixed(6);
-}
-
-/** Handle returned by SDK subscription methods (e.g. allMids, assetCtxs). */
-interface SubscriptionHandle {
-  unsubscribe(): Promise<void>;
-}
-
-/**
- * Create a WebSocket transport and subscription client, subscribe via the given
- * function, wait for the first event, then unsubscribe and close the transport.
- * Use for tools that need a single snapshot from a Hyperliquid SDK subscription
- * (e.g. allMids, assetCtxs) instead of a long-lived stream.
- */
-async function getSubscriptionSnapshot<T>(
-  subscribe: (
-    client: SubscriptionClient,
-    onData: (data: T) => void
-  ) => Promise<SubscriptionHandle>
-): Promise<T> {
-  const wsTransport = new WebSocketTransport({
-    timeout: DEFAULT_WS_TIMEOUT_MS,
-  });
-  const subClient = new SubscriptionClient({ transport: wsTransport });
-
-  let resolveFirst: (data: T) => void;
-  const firstDataPromise = new Promise<T>((resolve) => {
-    resolveFirst = resolve;
-  });
-
-  let timedOut = false;
-  let timeoutId: ReturnType<typeof setTimeout>;
-  const timeoutPromise = new Promise<never>((_, reject) => {
-    timeoutId = setTimeout(
-      () => {
-        timedOut = true;
-        reject(new Error(DEFAULT_WS_TIMEOUT_MESSAGE));
-      },
-      DEFAULT_WS_TIMEOUT_MS
-    );
-  });
-
-  let subscription: SubscriptionHandle | null = null;
-  try {
-    await Promise.race([wsTransport.ready(), timeoutPromise]);
-    subscription = await Promise.race([
-      subscribe(subClient, (data) => {
-        if (timedOut) return;
-        resolveFirst(data);
-      }),
-      timeoutPromise,
-    ]);
-    return await Promise.race([firstDataPromise, timeoutPromise]);
-  } finally {
-    clearTimeout(timeoutId!);
-    if (subscription) await subscription.unsubscribe().catch(() => {});
-    await wsTransport.close().catch(() => {});
-  }
-}
-
-// ---------------------------------------------------------------------------
 // Tools
 // ---------------------------------------------------------------------------
 
 /**
- * Retrieve mid price for a single coin.
+ * Retrieve mid price(s) for one or more coins.
  * Uses the Hyperliquid REST info endpoint (allMids) for low latency.
- * If the book is empty, the last trade price will be used as a fallback.
- * Coin may be "SYMBOL" or "dex:SYMBOL"; when "dex:SYMBOL" is used, the dex part is passed to allMids.
+ * Coin values may be "SYMBOL" or "dex:SYMBOL"; when dex-prefixed, the dex part is passed to allMids.
+ * Accepts `coin` (single) or `coins` (list).
  */
 async function getCoinPrice(
   args: Record<string, unknown>,
   _context?: { apiKey?: string; userId?: string }
 ): Promise<string> {
-  const rawCoin = requireField(args?.coin, coinSchema, "coin", COIN_HINT);
-  const dexColonIndex = rawCoin.indexOf(":");
-  const dex: string | undefined =
-    dexColonIndex >= 0 ? rawCoin.slice(0, dexColonIndex) : undefined;
-  const coin = dexColonIndex >= 0 ? rawCoin.slice(dexColonIndex + 1) : rawCoin;
-  const key = coin.toUpperCase();
+  const coinsParsed = coinsSchema.safeParse(args?.coins);
+  const requestedCoins = coinsParsed.success
+    ? coinsParsed.data
+    : args?.coin !== undefined
+      ? [requireField(args?.coin, coinSchema, "coin", COIN_HINT)]
+      : [];
+  if (requestedCoins.length === 0) {
+    throw new Error(
+      `Invalid or missing coin(s): provide either 'coin' or non-empty 'coins'. ${COIN_HINT}`
+    );
+  }
+
+  const byDex = new Map<string, Array<{ rawCoin: string; key: string }>>();
+  for (const rawCoin of requestedCoins) {
+    const dexColonIndex = rawCoin.indexOf(":");
+    const dex = dexColonIndex >= 0 ? rawCoin.slice(0, dexColonIndex) : "";
+    const coin = dexColonIndex >= 0 ? rawCoin.slice(dexColonIndex + 1) : rawCoin;
+    const key = coin.toUpperCase();
+    const list = byDex.get(dex) ?? [];
+    list.push({ rawCoin, key });
+    byDex.set(dex, list);
+  }
 
   try {
-    const mids = await infoClient.allMids(dex !== undefined ? { dex } : undefined);
-    const mid = mids[key];
-    if (mid === undefined) {
-      const available = Object.keys(mids).slice(0, 10).join(", ");
-      throw new Error(
-        `Coin '${rawCoin}' not found. Available coins include: ${available}...`
-      );
+    const midsByDex = new Map<string, Record<string, string>>();
+    await Promise.all(
+      Array.from(byDex.keys()).map(async (dex) => {
+        const mids = await infoClient.allMids(dex !== "" ? { dex } : undefined);
+        midsByDex.set(dex, mids);
+      })
+    );
+
+    const prices: Record<string, string> = {};
+    for (const [dex, list] of byDex) {
+      const mids = midsByDex.get(dex) ?? {};
+      for (const { rawCoin, key } of list) {
+        const mid = mids[key];
+        if (mid === undefined) {
+          const available = Object.keys(mids).slice(0, 10).join(", ");
+          throw new Error(
+            `Coin '${rawCoin}' not found. Available coins include: ${available}...`
+          );
+        }
+        prices[rawCoin] = mid;
+      }
     }
-    return JSON.stringify({ [rawCoin]: mid }, null, 2);
+    return JSON.stringify(prices, null, 2);
   } catch (error) {
     const errorMessage =
       error instanceof Error ? error.message : String(error);
-    throw new Error(`Failed to retrieve mid for ${rawCoin}: ${errorMessage}`);
+    throw new Error(`Failed to retrieve mid prices: ${errorMessage}`);
   }
 }
 
@@ -251,7 +208,7 @@ async function getOpenOrders(
   const user = requireField(args?.user, userSchema, "user", USER_HINT);
   try {
     const data = await infoClient.frontendOpenOrders({ user });
-    return JSON.stringify(data, null, 2);
+    return JSON.stringify(formatOpenOrders(user, data), null, 2);
   } catch (error) {
     const errorMessage =
       error instanceof Error ? error.message : String(error);
@@ -263,86 +220,35 @@ async function getOpenOrders(
  * Retrieve user fills (trade history) for a user
  * Uses the Hyperliquid SDK InfoClient userFills (always aggregated by time)
  */
-async function getUserFills(
+async function getTradeHistory(
   args: Record<string, unknown>,
   _context?: { apiKey?: string; userId?: string }
 ): Promise<string> {
   const user = requireField(args?.user, userSchema, "user", USER_HINT);
+  const coin =
+    args?.coin === undefined || args?.coin === null
+      ? undefined
+      : requireField(args?.coin, coinSchema, "coin", COIN_HINT);
+  const limit =
+    requireField(
+      args?.limit,
+      tradeHistoryLimitSchema,
+      "limit",
+      "Provide limit between 1 and 50."
+    ) ?? 10;
   try {
     const data = await infoClient.userFills({ user, aggregateByTime: true });
-    return JSON.stringify(data, null, 2);
+    const filtered = coin
+      ? data.filter((fill) => fill.coin.toUpperCase() === coin.toUpperCase())
+      : data;
+    const sorted = [...filtered].sort((a, b) => b.time - a.time);
+    const limited = sorted.slice(0, limit);
+    return JSON.stringify(formatUserFills(user, limited), null, 2);
   } catch (error) {
     const errorMessage =
       error instanceof Error ? error.message : String(error);
     throw new Error(`Failed to retrieve user fills: ${errorMessage}`);
   }
-}
-
-/**
- * Merge clearinghouse states into a single positions array and totals.
- * Reduces noise by dropping per-DEX margin summaries and aggregating position stats.
- */
-function formatPerpsSummary(event: {
-  user: string;
-  clearinghouseStates: [string, unknown][];
-}): {
-  user: string;
-  positions: Array<{ dex: string } & Record<string, unknown>>;
-  totals: {
-    positionValue: string;
-    unrealizedPnl: string;
-    returnOnEquity: string;
-    marginUsed: string;
-    fundingSinceOpen: string;
-  };
-} {
-  const positions: Array<{ dex: string } & Record<string, unknown>> = [];
-  let totalPositionValue = 0;
-  let totalUnrealizedPnl = 0;
-  let totalMarginUsed = 0;
-  let totalFundingSinceOpen = 0;
-
-  for (const [dex, state] of event.clearinghouseStates) {
-    const raw = state as { assetPositions?: Array<{ position?: Record<string, unknown> }> };
-    const list = raw?.assetPositions ?? [];
-    for (const ap of list) {
-      const pos = ap?.position as Record<string, unknown> | undefined;
-      if (!pos) continue;
-      const cumFunding = pos.cumFunding as { sinceOpen?: string } | undefined;
-      const positionValue = String(pos.positionValue ?? "0");
-      const unrealizedPnl = String(pos.unrealizedPnl ?? "0");
-      const marginUsed = String(pos.marginUsed ?? "0");
-      const fundingSinceOpen = String(cumFunding?.sinceOpen ?? "0");
-
-      positions.push({
-        dex: dex || "hyperliquid",
-        ...pos,
-      });
-
-      totalPositionValue += parseDecimal(positionValue);
-      totalUnrealizedPnl += parseDecimal(unrealizedPnl);
-      totalMarginUsed += parseDecimal(marginUsed);
-      totalFundingSinceOpen += parseDecimal(fundingSinceOpen);
-    }
-  }
-
-  // Portfolio RoE = (total unrealized PnL + total funding since open) / total margin used
-  const totalReturnOnEquity =
-    totalMarginUsed !== 0
-      ? (totalUnrealizedPnl + totalFundingSinceOpen) / totalMarginUsed
-      : 0;
-
-  return {
-    user: event.user,
-    positions,
-    totals: {
-      positionValue: formatDecimal(totalPositionValue),
-      unrealizedPnl: formatDecimal(totalUnrealizedPnl),
-      returnOnEquity: formatDecimal(totalReturnOnEquity),
-      marginUsed: formatDecimal(totalMarginUsed),
-      fundingSinceOpen: formatDecimal(totalFundingSinceOpen),
-    },
-  };
 }
 
 /**
@@ -381,128 +287,12 @@ async function getSpotAccountSummary(
   const user = requireField(args?.user, userSchema, "user", USER_HINT);
   try {
     const data = await infoClient.spotClearinghouseState({ user });
-    const transformed = {
-      balances: data.balances.map((b) => ({
-        coin: b.coin,
-        total: b.total,
-        inOrders: b.hold,
-      })),
-      ...(data.evmEscrows !== undefined && { evmEscrows: data.evmEscrows }),
-    };
-    return JSON.stringify(transformed, null, 2);
+    return JSON.stringify(formatSpotSummary(user, data), null, 2);
   } catch (error) {
     const errorMessage =
       error instanceof Error ? error.message : String(error);
     throw new Error(`Failed to retrieve spot account summary: ${errorMessage}`);
   }
-}
-
-/** Portfolio period snapshot from SDK (accountValueHistory, pnlHistory, vlm). */
-type PortfolioPeriod = {
-  accountValueHistory: [number, string][];
-  pnlHistory: [number, string][];
-  vlm: string;
-};
-
-/** Period metrics: PnL, ROE, and start value (for deriving spot). */
-type PeriodMetrics = { pnl: number; roe: number; startValue: number };
-
-/**
- * Derive PnL, ROE and start value for a single period from history arrays.
- * PnL = change in pnl over the period; ROE = PnL / starting equity.
- */
-function periodMetrics(period: PortfolioPeriod): PeriodMetrics {
-  const av = period.accountValueHistory;
-  const pnl = period.pnlHistory;
-  const startValue = av?.length ? parseDecimal(av[0][1]) : 0;
-  const startPnl = pnl?.length ? parseDecimal(pnl[0][1]) : 0;
-  const endPnl = pnl?.length ? parseDecimal(pnl[pnl.length - 1][1]) : 0;
-  const periodPnl = endPnl - startPnl;
-  const roe = startValue !== 0 ? periodPnl / startValue : 0;
-  return { pnl: periodPnl, roe, startValue };
-}
-
-/** Account-type overview: accountValue, pnl (current + periods), roe (periods only). */
-type AccountOverview = {
-  accountValue: string;
-  pnl: { current: string; day: string; week: string; month: string; all: string };
-  roe: { day: string; week: string; month: string; all: string };
-};
-
-/**
- * Build account overview from raw periods: accountValue, pnl { current, day, week, month, all }, roe { day, week, month, all }.
- * byPeriod must have day, week, month, allTime (e.g. from API for total, or mapped perpDay→day etc. for perp).
- */
-function buildAccountOverview(byPeriod: Record<string, PortfolioPeriod>): AccountOverview {
-  const all = byPeriod.allTime;
-  const day = byPeriod.day ? periodMetrics(byPeriod.day) : { pnl: 0, roe: 0, startValue: 0 };
-  const week = byPeriod.week ? periodMetrics(byPeriod.week) : { pnl: 0, roe: 0, startValue: 0 };
-  const month = byPeriod.month ? periodMetrics(byPeriod.month) : { pnl: 0, roe: 0, startValue: 0 };
-  const allM = all ? periodMetrics(all) : { pnl: 0, roe: 0, startValue: 0 };
-
-  const currentAccountValue = all?.accountValueHistory?.length
-    ? parseDecimal(all.accountValueHistory[all.accountValueHistory.length - 1][1])
-    : 0;
-  const currentPnl = all?.pnlHistory?.length
-    ? parseDecimal(all.pnlHistory[all.pnlHistory.length - 1][1])
-    : 0;
-
-  return {
-    accountValue: formatDecimal(currentAccountValue),
-    pnl: {
-      current: formatDecimal(currentPnl),
-      day: formatDecimal(day.pnl),
-      week: formatDecimal(week.pnl),
-      month: formatDecimal(month.pnl),
-      all: formatDecimal(allM.pnl),
-    },
-    roe: {
-      day: formatDecimal(day.roe),
-      week: formatDecimal(week.roe),
-      month: formatDecimal(month.roe),
-      all: formatDecimal(allM.roe),
-    },
-  };
-}
-
-/**
- * Derive spot overview from total minus perp (account value, pnl current + by period, roe by period).
- */
-function buildSpotOverview(
-  totalByPeriod: Record<string, PortfolioPeriod>,
-  perpByPeriod: Record<string, PortfolioPeriod>
-): AccountOverview {
-  const totalAll = totalByPeriod.allTime;
-  const perpAll = perpByPeriod.perpAllTime;
-  const currentAccountValue = (totalAll?.accountValueHistory?.length ? parseDecimal(totalAll.accountValueHistory[totalAll.accountValueHistory.length - 1][1]) : 0) -
-    (perpAll?.accountValueHistory?.length ? parseDecimal(perpAll.accountValueHistory[perpAll.accountValueHistory.length - 1][1]) : 0);
-  const currentPnl = (totalAll?.pnlHistory?.length ? parseDecimal(totalAll.pnlHistory[totalAll.pnlHistory.length - 1][1]) : 0) -
-    (perpAll?.pnlHistory?.length ? parseDecimal(perpAll.pnlHistory[perpAll.pnlHistory.length - 1][1]) : 0);
-
-  const keys: Array<{ total: keyof typeof totalByPeriod; perp: keyof typeof perpByPeriod }> = [
-    { total: "day", perp: "perpDay" },
-    { total: "week", perp: "perpWeek" },
-    { total: "month", perp: "perpMonth" },
-    { total: "allTime", perp: "perpAllTime" },
-  ];
-  const pnl: AccountOverview["pnl"] = { current: formatDecimal(currentPnl), day: "0", week: "0", month: "0", all: "0" };
-  const roe: AccountOverview["roe"] = { day: "0", week: "0", month: "0", all: "0" };
-  for (const { total, perp } of keys) {
-    const t = totalByPeriod[total] ? periodMetrics(totalByPeriod[total]) : { pnl: 0, roe: 0, startValue: 0 };
-    const p = perpByPeriod[perp] ? periodMetrics(perpByPeriod[perp]) : { pnl: 0, roe: 0, startValue: 0 };
-    const spotPnl = t.pnl - p.pnl;
-    const spotStartValue = t.startValue - p.startValue;
-    const spotRoe = spotStartValue !== 0 ? spotPnl / spotStartValue : 0;
-    const periodKey = total === "allTime" ? "all" : total;
-    pnl[periodKey as keyof typeof pnl] = formatDecimal(spotPnl);
-    roe[periodKey as keyof typeof roe] = formatDecimal(spotRoe);
-  }
-
-  return {
-    accountValue: formatDecimal(currentAccountValue),
-    pnl,
-    roe,
-  };
 }
 
 /**
@@ -518,25 +308,7 @@ export async function getPortfolioOverview(
   const user = requireField(args?.user, userSchema, "user", USER_HINT);
   try {
     const data = await infoClient.portfolio({ user });
-    // data: [["day", {...}], ["week", ...], ["month", ...], ["allTime", ...], ["perpDay", ...], ["perpWeek", ...], ["perpMonth", ...], ["perpAllTime", ...]]
-    const byPeriod = Object.fromEntries(data) as Record<string, PortfolioPeriod>;
-
-    const total = buildAccountOverview(byPeriod);
-    const perp = buildAccountOverview({
-      day: byPeriod.perpDay,
-      week: byPeriod.perpWeek,
-      month: byPeriod.perpMonth,
-      allTime: byPeriod.perpAllTime,
-    });
-    const spot = buildSpotOverview(byPeriod, byPeriod);
-
-    const overview = {
-      user,
-      total,
-      perp,
-      spot,
-    };
-    return JSON.stringify(overview, null, 2);
+    return JSON.stringify(formatPortfolioOverview(user, data), null, 2);
   } catch (error) {
     const errorMessage =
       error instanceof Error ? error.message : String(error);
@@ -544,61 +316,80 @@ export async function getPortfolioOverview(
   }
 }
 
+/**
+ * Retrieve a compact account overview for agent context:
+ * - portfolio snapshot (same structure as get_portfolio_overview)
+ * - open positions (concise)
+ * - open orders (concise)
+ * - spot balances (non-zero only)
+ *
+ * All API calls are executed in parallel for speed.
+ */
+export async function getAccountOverview(
+  args: Record<string, unknown>,
+  _context?: { apiKey?: string; userId?: string }
+): Promise<string> {
+  const user = requireField(args?.user, userSchema, "user", USER_HINT);
+  try {
+    const [perpsEvent, openOrdersData, spotState, portfolioData] = await Promise.all([
+      getSubscriptionSnapshot<{
+        user: string;
+        clearinghouseStates: [string, unknown][];
+      }>((client, onData) => client.allDexsClearinghouseState({ user }, onData)),
+      infoClient.frontendOpenOrders({ user }),
+      infoClient.spotClearinghouseState({ user }),
+      infoClient.portfolio({ user }),
+    ]);
 
-/** Default periods for indicators (standard defaults). */
-const DEFAULT_RSI_PERIOD = 14;
-/** Length of SMA applied to RSI (for rsiSma and crossover). */
-const RSI_SMA_LENGTH = 14;
-const DEFAULT_MACD_FAST = 12;
-const DEFAULT_MACD_SLOW = 26;
-const DEFAULT_MACD_SIGNAL = 9;
-const DEFAULT_ATR_PERIOD = 14;
-const DEFAULT_BB_PERIOD = 20;
-const DEFAULT_BB_STDDEV = 2;
-const DEFAULT_EMA_PERIOD = 20;
-const DEFAULT_SMA_PERIOD = 20;
+    const perpsSummary = formatPerpsSummary(perpsEvent);
+    const portfolio = formatPortfolioOverview(user, portfolioData);
+    const openOrders = formatOpenOrders(user, openOrdersData);
+    const spotSummary = formatSpotSummary(user, spotState, { nonZeroOnly: true });
 
-type CandleRow = {
-  T: number;
-  o: string;
-  h: string;
-  l: string;
-  c: string;
-  v: string;
-  s?: string;
-  i?: string;
-};
+    const overview = {
+      portfolio,
+      perpsSummary,
+      spotSummary,
+      openOrders,
+    };
+
+    return JSON.stringify(overview, null, 2);
+  } catch (error) {
+    const errorMessage =
+      error instanceof Error ? error.message : String(error);
+    throw new Error(`Failed to retrieve account overview: ${errorMessage}`);
+  }
+}
 
 /**
- * Compute required candle lookback from requested indicators and their periods.
- * Each indicator needs at least its period (MACD needs slow + signal) for warmup.
+ * Get leverage, max trade size, available-to-trade (long/short), and mark price for a user's coin context.
+ * Uses the Hyperliquid SDK InfoClient activeAssetData.
  */
-function getRequiredIndicatorLookback(
-  indicators: string[] | null,
-  periods: {
-    rsiPeriod: number;
-    macdSlow: number;
-    macdSignal: number;
-    atrPeriod: number;
-    bbPeriod: number;
-    emaPeriod: number;
-    smaPeriod: number;
+async function getActiveAssetData(
+  args: Record<string, unknown>,
+  _context?: { apiKey?: string; userId?: string }
+): Promise<string> {
+  const user = requireField(args?.user, userSchema, "user", USER_HINT);
+  const coin = requireField(args?.coin, coinSchema, "coin", COIN_HINT);
+  try {
+    const data = await infoClient.activeAssetData({ user, coin });
+    const coinKey = coin.toLowerCase();
+    const transformed = {
+      user: data.user,
+      coin: data.coin,
+      leverage: data.leverage,
+      [`max_${coinKey}_trade_size_short`]: data.maxTradeSzs[0],
+      [`max_${coinKey}_trade_size_long`]: data.maxTradeSzs[1],
+      available_usdc_short: data.availableToTrade[0],
+      available_usdc_long: data.availableToTrade[1],
+      mark_price: data.markPx,
+    };
+    return JSON.stringify(transformed, null, 2);
+  } catch (error) {
+    const errorMessage =
+      error instanceof Error ? error.message : String(error);
+    throw new Error(`Failed to retrieve coin leverage and limits: ${errorMessage}`);
   }
-): number {
-  if (!indicators?.length) return DEFAULT_INDICATOR_LOOKBACK;
-  let lookback = 0;
-  // RSI SMA needs rsiPeriod + RSI_SMA_LENGTH candles for RSI, then (RSI_SMA_LENGTH - 1) more for first SMA value
-  if (indicators.includes("rsi"))
-    lookback = Math.max(lookback, periods.rsiPeriod + RSI_SMA_LENGTH + (RSI_SMA_LENGTH - 1));
-  if (indicators.includes("macd"))
-    lookback = Math.max(lookback, periods.macdSlow + periods.macdSignal);
-  if (indicators.includes("atr")) lookback = Math.max(lookback, periods.atrPeriod);
-  if (indicators.includes("bollingerBands")) lookback = Math.max(lookback, periods.bbPeriod);
-  if (indicators.includes("ema")) lookback = Math.max(lookback, periods.emaPeriod);
-  if (indicators.includes("sma")) lookback = Math.max(lookback, periods.smaPeriod);
-  // VWAP is cumulative per candle, no extra warmup
-  if (indicators.includes("vwap")) lookback = Math.max(lookback, 1);
-  return lookback || DEFAULT_INDICATOR_LOOKBACK;
 }
 
 /**
@@ -622,92 +413,6 @@ async function fetchCandlesForIndicators(
   });
   const raw = Array.isArray(data) ? data : [data];
   return raw as CandleRow[];
-}
-
-const DEFAULT_PIVOT_LEFT = 10;
-const DEFAULT_PIVOT_RIGHT = 5;
-const PIVOT_CANDLE_COUNT = 300;
-const PIVOT_MAX_RECENT = 5;
-
-type PivotPoint = {
-  timestamp: number;
-  timestampIso: string;
-  barsAgo: number;
-  price: number;
-  pctFromCurrentClose: number;
-};
-
-/**
- * Compute pivot highs and pivot lows from OHLC arrays.
- * A pivot high at index i: high[i] is the max of high[i-left]..high[i+right].
- * A pivot low at index i: low[i] is the min of low[i-left]..low[i+right].
- * Only includes pivots that have not been cleared: no candle after the pivot bar
- * has broken the level (high >= pivot high price, or low <= pivot low price).
- * Candles are ordered oldest-first; "current" is the last candle (index n-1).
- */
-function computePivots(
-  raw: CandleRow[],
-  left: number,
-  right: number,
-  currentClose: number
-): { pivotHighs: PivotPoint[]; pivotLows: PivotPoint[] } {
-  const n = raw.length;
-  const high = raw.map((c) => parseDecimal(c.h));
-  const low = raw.map((c) => parseDecimal(c.l));
-  const pivotHighs: PivotPoint[] = [];
-  const pivotLows: PivotPoint[] = [];
-
-  for (let i = left; i < n - right; i++) {
-    let isPivotHigh = true;
-    let isPivotLow = true;
-    const hi = high[i];
-    const li = low[i];
-
-    for (let j = i - left; j <= i + right; j++) {
-      if (j === i) continue;
-      if (high[j] > hi) isPivotHigh = false;
-      if (low[j] < li) isPivotLow = false;
-      if (!isPivotHigh && !isPivotLow) break;
-    }
-
-    const barsAgo = n - 1 - i;
-    const pctFromClose = currentClose !== 0
-      ? Math.round((hi - currentClose) / currentClose * 10000) / 100
-      : 0;
-    const pctFromCloseLow = currentClose !== 0
-      ? Math.round((li - currentClose) / currentClose * 10000) / 100
-      : 0;
-
-    // Not cleared: no candle after this pivot has broken the level (high above pivot high, low below pivot low)
-    let pivotHighNotCleared = true;
-    let pivotLowNotCleared = true;
-    for (let j = i + 1; j < n; j++) {
-      if (high[j] >= hi) pivotHighNotCleared = false;
-      if (low[j] <= li) pivotLowNotCleared = false;
-      if (!pivotHighNotCleared && !pivotLowNotCleared) break;
-    }
-
-    if (isPivotHigh && pivotHighNotCleared) {
-      pivotHighs.push({
-        timestamp: raw[i].T,
-        timestampIso: new Date(raw[i].T).toISOString(),
-        barsAgo,
-        price: hi,
-        pctFromCurrentClose: pctFromClose,
-      });
-    }
-    if (isPivotLow && pivotLowNotCleared) {
-      pivotLows.push({
-        timestamp: raw[i].T,
-        timestampIso: new Date(raw[i].T).toISOString(),
-        barsAgo,
-        price: li,
-        pctFromCurrentClose: pctFromCloseLow,
-      });
-    }
-  }
-
-  return { pivotHighs, pivotLows };
 }
 
 /**
@@ -1100,37 +805,6 @@ export async function getCandleSnapshotWithIndicators(
   }
 }
 
-/**
- * Get leverage, max trade size, available margin, and mark price for a user's position in a coin.
- * Uses the Hyperliquid SDK InfoClient activeAssetData
- */
-async function getCoinLeverageAndLimits(
-  args: Record<string, unknown>,
-  _context?: { apiKey?: string; userId?: string }
-): Promise<string> {
-  const user = requireField(args?.user, userSchema, "user", USER_HINT);
-  const coin = requireField(args?.coin, coinSchema, "coin", COIN_HINT);
-  try {
-    const data = await infoClient.activeAssetData({ user, coin });
-    const coinKey = coin.toLowerCase();
-    const transformed = {
-      user: data.user,
-      coin: data.coin,
-      leverage: data.leverage,
-      [`max_${coinKey}_trade_size_short`]: data.maxTradeSzs[0],
-      [`max_${coinKey}_trade_size_long`]: data.maxTradeSzs[1],
-      available_usdc_short: data.availableToTrade[0],
-      available_usdc_long: data.availableToTrade[1],
-      mark_price: data.markPx,
-    };
-    return JSON.stringify(transformed, null, 2);
-  } catch (error) {
-    const errorMessage =
-      error instanceof Error ? error.message : String(error);
-    throw new Error(`Failed to retrieve coin leverage and limits: ${errorMessage}`);
-  }
-}
-
 
 // ---------------------------------------------------------------------------
 // Tool Definitions
@@ -1138,29 +812,36 @@ async function getCoinLeverageAndLimits(
 export const hyperliquidApiTools: SdkToolDefinition[] = [
   {
     name: "get_coin_price",
-    title: "Get Coin Price",
-    description: "Retrieve the mid price for a single coin (e.g. BTC, ETH).",
-    inputSchema: { coin: coinSchema },
+    title: "Get Coin Price(s)",
+    description: "Retrieve market prices for one or more coins. Accepts `coin` (single) or `coins` (array).",
+    inputSchema: {
+      coin: coinSchema.optional(),
+      coins: coinsSchema.optional(),
+    },
     handler: async (args, _extra) => toContent(await getCoinPrice(args, getRequestContext())),
   },
   {
     name: "get_open_orders",
     title: "Get Open Orders",
-    description: "Retrieve open orders for a user.",
+    description: "Retrieve a user's open orders.",
     inputSchema: { user: userSchema },
     handler: async (args, _extra) => toContent(await getOpenOrders(args, getRequestContext())),
   },
   {
-    name: "get_user_fills",
-    title: "Get User Fills",
-    description: "Retrieve user fills (trade history) for a user.",
-    inputSchema: { user: userSchema },
-    handler: async (args, _extra) => toContent(await getUserFills(args, getRequestContext())),
+    name: "get_trade_history",
+    title: "Get Trade History",
+    description: "Retrieve a user's most recent trade history, with optional coin filter and result limit.",
+    inputSchema: {
+      user: userSchema,
+      coin: coinSchema.optional(),
+      limit: tradeHistoryLimitSchema,
+    },
+    handler: async (args, _extra) => toContent(await getTradeHistory(args, getRequestContext())),
   },
   {
     name: "get_perps_account_summary",
     title: "Get Perps Account Summary",
-    description: "Retrieve perpetuals account positions for a user.",
+    description: "Retrieve a user's perpetuals account positions.",
     inputSchema: { user: userSchema },
     handler: async (args, _extra) =>
       toContent(await getPerpsAccountSummary(args, getRequestContext())),
@@ -1168,7 +849,7 @@ export const hyperliquidApiTools: SdkToolDefinition[] = [
   {
     name: "get_spot_account_summary",
     title: "Get Spot Account Summary",
-    description: "Retrieve spot account balances for a user.",
+    description: "Retrieve a user's spot account balances.",
     inputSchema: { user: userSchema },
     handler: async (args, _extra) =>
       toContent(await getSpotAccountSummary(args, getRequestContext())),
@@ -1176,10 +857,29 @@ export const hyperliquidApiTools: SdkToolDefinition[] = [
   {
     name: "get_portfolio_overview",
     title: "Get Portfolio Overview",
-    description: "Retrieve portfolio overview for a user by type (total, perp, spot): current value, PnL, and ROE for day/week/month/all.",
+    description: "Retrieve a user's portfolio overview (total, perp, spot): current value, PnL, and ROE for day/week/month/all.",
     inputSchema: { user: userSchema },
     handler: async (args, _extra) =>
       toContent(await getPortfolioOverview(args, getRequestContext())),
+  },
+  {
+    name: "get_account_overview",
+    title: "Get Account Overview",
+    description: "Retrieve a user's full account overview: portfolio overview, perps account summary, spot account summary, and open orders.",
+    inputSchema: { user: userSchema },
+    handler: async (args, _extra) =>
+      toContent(await getAccountOverview(args, getRequestContext())),
+  },
+  {
+    name: "get_active_asset_data",
+    title: "Get Active Asset Data",
+    description: "Retrieve a user's current leverage, max trade size, available-to-trade, and mark price for a coin.",
+    inputSchema: {
+      user: userSchema,
+      coin: coinSchema,
+    },
+    handler: async (args, _extra) =>
+      toContent(await getActiveAssetData(args, getRequestContext())),
   },
   {
     name: "get_market_data",
@@ -1215,16 +915,5 @@ export const hyperliquidApiTools: SdkToolDefinition[] = [
     },
     handler: async (args, _extra) =>
       toContent(await getPivotHighsAndLows(args, getRequestContext())),
-  },
-  {
-    name: "get_coin_leverage_and_limits",
-    title: "Get Coin Leverage and Limits",
-    description: "Retrieve a user's current leverage, max trade size, available margin, and mark price for a coin.",
-    inputSchema: {
-      user: userSchema,
-      coin: coinSchema,
-    },
-    handler: async (args, _extra) =>
-      toContent(await getCoinLeverageAndLimits(args, getRequestContext())),
   },
 ];
