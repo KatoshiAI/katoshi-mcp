@@ -67,7 +67,7 @@ const MAX_CANDLE_COUNT = 30;
 /** Hardcap: max candles we may fetch for indicator warmup (e.g. EMA 200 + count). */
 const MAX_CANDLES_FOR_INDICATORS = 500;
 
-const COIN_HINT = "Provide coin (e.g. BTC, ETH).";
+const COIN_HINT = "Provide coin (e.g. BTC, ETH) or spot pair (e.g. BTC/USDC).";
 const USER_HINT = "Provide user (wallet address, e.g. 0x...).";
 const INTERVAL_HINT = "Use one of: 1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 8h, 12h, 1d, 3d, 1w, 1M.";
 
@@ -105,6 +105,11 @@ const tradeHistoryLimitSchema = z
   .max(50)
   .nullish()
   .describe("Maximum number of most recent fills to return (1-50, default 10).");
+const marketQuerySchema = z
+  .string()
+  .trim()
+  .min(1)
+  .describe("Market search query (e.g. BTC).");
 const userSchema = z.string().transform((s) => s.toLowerCase()).describe("The user's hyperliquid wallet address (e.g. 0x...).");
 const candleIntervalSchema = z.enum(["1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "8h", "12h", "1d", "3d", "1w", "1M"]).describe("Candle interval (Allowed: 1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 8h, 12h, 1d, 3d, 1w, 1M).");
 const candleCountSchema = z.number().int().min(1).max(MAX_CANDLE_COUNT).nullish();
@@ -129,6 +134,55 @@ const bbStdDevSchema = z.number().min(1).max(3).nullish().describe("Bollinger Ba
 const emaPeriodSchema = z.number().int().min(2).max(200).nullish().describe("EMA period (default 20, max 200).");
 const smaPeriodSchema = z.number().int().min(2).max(200).nullish().describe("SMA period (default 20, max 200).");
 
+let spotPairIdMapPromise: Promise<Map<string, string>> | null = null;
+
+async function getSpotPairIdMap(): Promise<Map<string, string>> {
+  if (spotPairIdMapPromise) return spotPairIdMapPromise;
+  spotPairIdMapPromise = (async () => {
+    const meta = await infoClient.spotMeta();
+    const tokenNameByIndex = new Map<number, string>();
+    for (const token of meta.tokens) {
+      tokenNameByIndex.set(token.index, token.name);
+    }
+
+    const map = new Map<string, string>();
+    for (const market of meta.universe) {
+      if (market.tokens.length < 2) continue;
+      const base = tokenNameByIndex.get(market.tokens[0]);
+      const quote = tokenNameByIndex.get(market.tokens[1]);
+      if (!base || !quote) continue;
+      map.set(`${base}/${quote}`.toUpperCase(), market.name);
+    }
+    return map;
+  })();
+  return spotPairIdMapPromise;
+}
+
+/**
+ * Normalize coin parameter for Hyperliquid endpoints:
+ * - Perps / dex-perps: keep as-is (e.g. BTC, dex:BTC).
+ * - Spot pair symbols: convert BASE/QUOTE to spot pair id (e.g. BTC/USDC -> @105).
+ */
+async function normalizeCoinParam(rawCoin: string): Promise<string> {
+  if (!rawCoin.includes("/")) return rawCoin;
+
+  const colonIndex = rawCoin.indexOf(":");
+  if (colonIndex >= 0 && colonIndex < rawCoin.indexOf("/")) {
+    throw new Error(
+      `Spot pair '${rawCoin}' should not include dex prefix. Use BASE/QUOTE (e.g. BTC/USDC).`
+    );
+  }
+
+  const pairIdMap = await getSpotPairIdMap();
+  const pairId = pairIdMap.get(rawCoin.toUpperCase());
+  if (!pairId) {
+    throw new Error(
+      `Spot pair '${rawCoin}' not found. Use format BASE/QUOTE (e.g. BTC/USDC).`
+    );
+  }
+  return pairId;
+}
+
 // ---------------------------------------------------------------------------
 // Tools
 // ---------------------------------------------------------------------------
@@ -144,22 +198,33 @@ async function getCoinPrice(
   _context?: { apiKey?: string; userId?: string }
 ): Promise<string> {
   const coinsParsed = coinsSchema.safeParse(args?.coins);
-  const requestedCoins = coinsParsed.success
+  const requestedCoinsRaw = coinsParsed.success
     ? coinsParsed.data
     : args?.coin !== undefined
       ? [requireField(args?.coin, coinSchema, "coin", COIN_HINT)]
       : [];
-  if (requestedCoins.length === 0) {
+  if (requestedCoinsRaw.length === 0) {
     throw new Error(
       `Invalid or missing coin(s): provide either 'coin' or non-empty 'coins'. ${COIN_HINT}`
     );
   }
 
+  const requestedCoins = await Promise.all(
+    requestedCoinsRaw.map(async (rawCoin) => ({
+      rawCoin,
+      normalizedCoin: await normalizeCoinParam(rawCoin),
+    }))
+  );
+
   const byDex = new Map<string, Array<{ rawCoin: string; key: string }>>();
-  for (const rawCoin of requestedCoins) {
-    const dexColonIndex = rawCoin.indexOf(":");
-    const dex = dexColonIndex >= 0 ? rawCoin.slice(0, dexColonIndex) : "";
-    const coin = dexColonIndex >= 0 ? rawCoin.slice(dexColonIndex + 1) : rawCoin;
+  for (const { rawCoin, normalizedCoin } of requestedCoins) {
+    const dexColonIndex = normalizedCoin.indexOf(":");
+    const dex =
+      dexColonIndex >= 0 ? normalizedCoin.slice(0, dexColonIndex) : "";
+    const coin =
+      dexColonIndex >= 0
+        ? normalizedCoin.slice(dexColonIndex + 1)
+        : normalizedCoin;
     const key = coin.toUpperCase();
     const list = byDex.get(dex) ?? [];
     list.push({ rawCoin, key });
@@ -168,32 +233,117 @@ async function getCoinPrice(
 
   try {
     const midsByDex = new Map<string, Record<string, string>>();
-    await Promise.all(
-      Array.from(byDex.keys()).map(async (dex) => {
+    const dexKeys = Array.from(byDex.keys());
+    const dexFetchResults = await Promise.allSettled(
+      dexKeys.map(async (dex) => {
         const mids = await infoClient.allMids(dex !== "" ? { dex } : undefined);
-        midsByDex.set(dex, mids);
+        return { dex, mids };
       })
     );
+    const dexErrors = new Map<string, string>();
+    for (let i = 0; i < dexFetchResults.length; i++) {
+      const result = dexFetchResults[i];
+      if (result.status === "fulfilled") {
+        midsByDex.set(result.value.dex, result.value.mids);
+        continue;
+      }
+      const reason =
+        result.reason instanceof Error
+          ? result.reason.message
+          : String(result.reason);
+      const dex = dexKeys[i];
+      dexErrors.set(dex, reason);
+    }
 
-    const prices: Record<string, string> = {};
+    const resultByCoin: Record<string, string> = {};
     for (const [dex, list] of byDex) {
+      const dexError = dexErrors.get(dex);
+      if (dexError) {
+        for (const { rawCoin } of list) {
+          resultByCoin[rawCoin] = `Failed to fetch mids for dex '${dex || "hyperliquid"}': ${dexError}`;
+        }
+        continue;
+      }
+
       const mids = midsByDex.get(dex) ?? {};
       for (const { rawCoin, key } of list) {
         const mid = mids[key];
         if (mid === undefined) {
-          const available = Object.keys(mids).slice(0, 10).join(", ");
-          throw new Error(
-            `Coin '${rawCoin}' not found. Available coins include: ${available}...`
-          );
+          resultByCoin[rawCoin] = "Coin not found.";
+          continue;
         }
-        prices[rawCoin] = mid;
+        resultByCoin[rawCoin] = mid;
       }
     }
-    return JSON.stringify(prices, null, 2);
+    return JSON.stringify(resultByCoin, null, 2);
   } catch (error) {
     const errorMessage =
       error instanceof Error ? error.message : String(error);
     throw new Error(`Failed to retrieve mid prices: ${errorMessage}`);
+  }
+}
+
+/**
+ * Search all markets by query across perps (all dexs) and spot pairs.
+ */
+async function searchMarkets(
+  args: Record<string, unknown>,
+  _context?: { apiKey?: string; userId?: string }
+): Promise<string> {
+  const query = requireField(
+    args?.query,
+    marketQuerySchema,
+    "query",
+    "Provide a non-empty market query (e.g. BTC)."
+  );
+  const queryUpper = query.toUpperCase();
+
+  try {
+    const allPerpMetas = await infoClient.allPerpMetas();
+    const perpMatches = new Set<string>();
+    for (let i = 0; i < allPerpMetas.length; i++) {
+      const meta = allPerpMetas[i];
+      for (const asset of meta.universe) {
+        if (asset.isDelisted === true) continue;
+        if (!asset.name.toUpperCase().includes(queryUpper)) continue;
+        perpMatches.add(asset.name);
+      }
+    }
+
+    const spotMeta = await infoClient.spotMeta();
+    const tokenByIndex = new Map<number, string>();
+    for (const token of spotMeta.tokens) tokenByIndex.set(token.index, token.name);
+
+    const spotMatches = new Set<string>();
+    for (const market of spotMeta.universe) {
+      if (market.tokens.length < 2) continue;
+      const base = tokenByIndex.get(market.tokens[0]);
+      const quote = tokenByIndex.get(market.tokens[1]);
+      if (!base || !quote) continue;
+      const pair = `${base}/${quote}`;
+      if (!pair.toUpperCase().includes(queryUpper)) continue;
+      spotMatches.add(pair);
+    }
+
+    return JSON.stringify(
+      {
+        query,
+        perps: {
+          count: perpMatches.size,
+          list: Array.from(perpMatches).sort(),
+        },
+        spot: {
+          count: spotMatches.size,
+          list: Array.from(spotMatches).sort(),
+        },
+      },
+      null,
+      2
+    );
+  } catch (error) {
+    const errorMessage =
+      error instanceof Error ? error.message : String(error);
+    throw new Error(`Failed to search markets for '${query}': ${errorMessage}`);
   }
 }
 
@@ -225,10 +375,11 @@ async function getTradeHistory(
   _context?: { apiKey?: string; userId?: string }
 ): Promise<string> {
   const user = requireField(args?.user, userSchema, "user", USER_HINT);
-  const coin =
+  const coinRaw =
     args?.coin === undefined || args?.coin === null
       ? undefined
       : requireField(args?.coin, coinSchema, "coin", COIN_HINT);
+  const coin = coinRaw ? await normalizeCoinParam(coinRaw) : undefined;
   const limit =
     requireField(
       args?.limit,
@@ -238,8 +389,14 @@ async function getTradeHistory(
     ) ?? 10;
   try {
     const data = await infoClient.userFills({ user, aggregateByTime: true });
-    const filtered = coin
-      ? data.filter((fill) => fill.coin.toUpperCase() === coin.toUpperCase())
+    const filtered = coinRaw
+      ? data.filter((fill) => {
+          const fillCoin = fill.coin.toUpperCase();
+          return (
+            fillCoin === coinRaw.toUpperCase() ||
+            (coin !== undefined && fillCoin === coin.toUpperCase())
+          );
+        })
       : data;
     const sorted = [...filtered].sort((a, b) => b.time - a.time);
     const limited = sorted.slice(0, limit);
@@ -370,13 +527,15 @@ async function getActiveAssetData(
   _context?: { apiKey?: string; userId?: string }
 ): Promise<string> {
   const user = requireField(args?.user, userSchema, "user", USER_HINT);
-  const coin = requireField(args?.coin, coinSchema, "coin", COIN_HINT);
+  const rawCoin = requireField(args?.coin, coinSchema, "coin", COIN_HINT);
+  const coin = await normalizeCoinParam(rawCoin);
   try {
     const data = await infoClient.activeAssetData({ user, coin });
-    const coinKey = coin.toLowerCase();
+    const coinKey = rawCoin.toLowerCase().replace("/", "_");
     const transformed = {
       user: data.user,
-      coin: data.coin,
+      coin: rawCoin,
+      resolvedCoin: coin,
       leverage: data.leverage,
       [`max_${coinKey}_trade_size_short`]: data.maxTradeSzs[0],
       [`max_${coinKey}_trade_size_long`]: data.maxTradeSzs[1],
@@ -424,7 +583,8 @@ export async function getPivotHighsAndLows(
   args: Record<string, unknown>,
   _context?: { apiKey?: string; userId?: string }
 ): Promise<string> {
-  const coin = requireField(args?.coin, coinSchema, "coin", COIN_HINT);
+  const rawCoin = requireField(args?.coin, coinSchema, "coin", COIN_HINT);
+  const coin = await normalizeCoinParam(rawCoin);
   const interval = requireField(
     args?.interval,
     candleIntervalSchema,
@@ -456,6 +616,7 @@ export async function getPivotHighsAndLows(
     return JSON.stringify(
       {
         coin,
+        requestedCoin: rawCoin,
         interval,
         currentClose,
         currentHigh,
@@ -481,7 +642,8 @@ export async function getCandleSnapshotWithIndicators(
   args: Record<string, unknown>,
   _context?: { apiKey?: string; userId?: string }
 ): Promise<string> {
-  const coin = requireField(args?.coin, coinSchema, "coin", COIN_HINT);
+  const rawCoin = requireField(args?.coin, coinSchema, "coin", COIN_HINT);
+  const coin = await normalizeCoinParam(rawCoin);
   const interval = requireField(
     args?.interval,
     candleIntervalSchema,
@@ -769,6 +931,7 @@ export async function getCandleSnapshotWithIndicators(
     const meta = indicators?.length
       ? {
           symbol: coin,
+          requestedCoin: rawCoin,
           interval,
           dataRange: {
             from: firstCandle?.timestampIso ?? null,
@@ -904,6 +1067,16 @@ export const hyperliquidApiTools: SdkToolDefinition[] = [
     },
     handler: async (args, _extra) =>
       toContent(await getCandleSnapshotWithIndicators(args, getRequestContext())),
+  },
+  {
+    name: "search_markets",
+    title: "Search Markets",
+    description: "Search available markets by query across perps (all dexs) and spot pairs.",
+    inputSchema: {
+      query: marketQuerySchema,
+    },
+    handler: async (args, _extra) =>
+      toContent(await searchMarkets(args, getRequestContext())),
   },
   {
     name: "get_pivot_highs_and_lows",
