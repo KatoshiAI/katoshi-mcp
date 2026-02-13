@@ -249,15 +249,24 @@ async function getOrderbook(
       bestBid !== null ? parseDecimal(bestBid) : null;
     const bestAskN =
       bestAsk !== null ? parseDecimal(bestAsk) : null;
-    const midPx =
+    const midPxN =
       bestBidN !== null && bestAskN !== null
-        ? formatDecimal((bestBidN + bestAskN) / 2)
+        ? (bestBidN + bestAskN) / 2
+        : null;
+    const midPx =
+      midPxN !== null
+        ? formatDecimal(midPxN)
         : null;
     const spread =
       data.spread ??
       (bestBidN !== null && bestAskN !== null
         ? formatDecimal(bestAskN - bestBidN)
         : null);
+    const spreadN = spread !== null ? parseDecimal(spread) : null;
+    const spreadPct =
+      spreadN !== null && midPxN !== null && midPxN !== 0
+        ? formatDecimal((spreadN / midPxN) * 100)
+        : null;
 
     const output = {
       coin: rawCoin,
@@ -266,6 +275,7 @@ async function getOrderbook(
         bestAsk,
         midPx,
         spread,
+        spreadPct,
         bidLevels: bids.length,
         askLevels: asks.length,
       },
