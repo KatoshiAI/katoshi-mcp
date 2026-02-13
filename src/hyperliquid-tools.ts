@@ -18,6 +18,7 @@ import { getRequestContext } from "./request-context.js";
 import { toContent, type SdkToolDefinition } from "./tool-common.js";
 import {
   computePivots,
+  formatDecimal,
   formatOpenOrders,
   formatPortfolioOverview,
   formatPerpsSummary,
@@ -110,6 +111,10 @@ const marketQuerySchema = z
   .trim()
   .min(1)
   .describe("Market search query (e.g. BTC).");
+const trendingSortingSchema = z
+  .enum(["volume", "price_change"])
+  .nullish()
+  .describe("Trending sorting: volume (24h notional) or price_change (24h % change). Default: volume.");
 const userSchema = z.string().transform((s) => s.toLowerCase()).describe("The user's hyperliquid wallet address (e.g. 0x...).");
 const candleIntervalSchema = z.enum(["1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "8h", "12h", "1d", "3d", "1w", "1M"]).describe("Candle interval (Allowed: 1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 8h, 12h, 1d, 3d, 1w, 1M).");
 const candleCountSchema = z.number().int().min(1).max(MAX_CANDLE_COUNT).nullish();
@@ -191,23 +196,18 @@ async function normalizeCoinParam(rawCoin: string): Promise<string> {
  * Retrieve mid price(s) for one or more coins.
  * Uses the Hyperliquid REST info endpoint (allMids) for low latency.
  * Coin values may be "SYMBOL" or "dex:SYMBOL"; when dex-prefixed, the dex part is passed to allMids.
- * Accepts `coin` (single) or `coins` (list).
+ * Accepts `coins` (list).
  */
 async function getCoinPrice(
   args: Record<string, unknown>,
   _context?: { apiKey?: string; userId?: string }
 ): Promise<string> {
-  const coinsParsed = coinsSchema.safeParse(args?.coins);
-  const requestedCoinsRaw = coinsParsed.success
-    ? coinsParsed.data
-    : args?.coin !== undefined
-      ? [requireField(args?.coin, coinSchema, "coin", COIN_HINT)]
-      : [];
-  if (requestedCoinsRaw.length === 0) {
-    throw new Error(
-      `Invalid or missing coin(s): provide either 'coin' or non-empty 'coins'. ${COIN_HINT}`
-    );
-  }
+  const requestedCoinsRaw = requireField(
+    args?.coins,
+    coinsSchema,
+    "coins",
+    "Provide non-empty coins list (e.g. ['BTC', 'ETH', 'HYPE/USDC'])."
+  );
 
   const requestedCoins = await Promise.all(
     requestedCoinsRaw.map(async (rawCoin) => ({
@@ -344,6 +344,240 @@ async function searchMarkets(
     const errorMessage =
       error instanceof Error ? error.message : String(error);
     throw new Error(`Failed to search markets for '${query}': ${errorMessage}`);
+  }
+}
+
+type PerpContextRow = {
+  coin: string;
+  volume24hNotional: string;
+  volume24hBase: string;
+  price24hChangePct: string;
+  prevDayPx: string;
+  midPx: string;
+  markPx: string;
+  funding: string;
+  openInterest: string;
+  premium: string;
+};
+
+type SpotContextRow = {
+  coin: string;
+  volume24hNotional: string;
+  volume24hBase: string;
+  price24hChangePct: string;
+  prevDayPx: string;
+  midPx: string;
+  markPx: string;
+};
+
+function computePrice24hChangePct(
+  prevDayPx: string,
+  refPx: string
+): string {
+  const prev = parseDecimal(prevDayPx);
+  const ref = parseDecimal(refPx);
+  const pct = prev !== 0 ? ((ref - prev) / prev) * 100 : 0;
+  return formatDecimal(pct);
+}
+
+async function fetchPerpContextRows(): Promise<PerpContextRow[]> {
+  const perpCtxEvent = await getSubscriptionSnapshot<{
+    ctxs: Array<
+      [string, Array<{
+        prevDayPx: string;
+        dayNtlVlm: string;
+        markPx: string;
+        midPx: string | null;
+        funding: string;
+        openInterest: string;
+        premium: string | null;
+        dayBaseVlm: string;
+      }>]
+    >;
+  }>((client, onData) => client.allDexsAssetCtxs(onData));
+
+  const perpDexs = perpCtxEvent.ctxs.map(([dex]) => dex);
+  const perpMetaResults = await Promise.all(
+    perpDexs.map(async (dex) => ({
+      dex,
+      meta: await infoClient.meta(dex ? { dex } : undefined),
+    }))
+  );
+  const perpMetaByDex = new Map(perpMetaResults.map((x) => [x.dex, x.meta]));
+
+  return perpCtxEvent.ctxs.flatMap(([dex, ctxs]) => {
+    const meta = perpMetaByDex.get(dex);
+    if (!meta) return [];
+    return ctxs.flatMap((ctx, i) => {
+      const asset = meta.universe[i];
+      if (!asset || asset.isDelisted === true) return [];
+      const coin =
+        dex && !asset.name.includes(":") ? `${dex}:${asset.name}` : asset.name;
+      const refPx = ctx.midPx ?? ctx.markPx;
+      return [{
+        coin,
+        volume24hNotional: ctx.dayNtlVlm,
+        volume24hBase: ctx.dayBaseVlm,
+        price24hChangePct: computePrice24hChangePct(ctx.prevDayPx, refPx),
+        prevDayPx: ctx.prevDayPx,
+        midPx: refPx,
+        markPx: ctx.markPx,
+        funding: ctx.funding,
+        openInterest: ctx.openInterest,
+        premium: ctx.premium ?? "0",
+      }];
+    });
+  });
+}
+
+async function fetchSpotContextRows(): Promise<SpotContextRow[]> {
+  const [spotMeta, spotCtxs] = await infoClient.spotMetaAndAssetCtxs();
+  const tokenNameByIndex = new Map<number, string>();
+  for (const token of spotMeta.tokens) tokenNameByIndex.set(token.index, token.name);
+
+  return spotMeta.universe.flatMap((market, i) => {
+    if (market.tokens.length < 2) return [];
+    const base = tokenNameByIndex.get(market.tokens[0]);
+    const quote = tokenNameByIndex.get(market.tokens[1]);
+    if (!base || !quote) return [];
+    const ctx = spotCtxs[market.index] ?? spotCtxs[i];
+    if (!ctx) return [];
+    const refPx = ctx.midPx ?? ctx.markPx;
+    return [{
+      coin: `${base}/${quote}`,
+      volume24hNotional: ctx.dayNtlVlm,
+      volume24hBase: ctx.dayBaseVlm,
+      price24hChangePct: computePrice24hChangePct(ctx.prevDayPx, refPx),
+      prevDayPx: ctx.prevDayPx,
+      midPx: refPx,
+      markPx: ctx.markPx,
+    }];
+  });
+}
+
+async function fetchAllMarketContextRows(): Promise<{
+  perps: PerpContextRow[];
+  spot: SpotContextRow[];
+}> {
+  const [perps, spot] = await Promise.all([
+    fetchPerpContextRows(),
+    fetchSpotContextRows(),
+  ]);
+  return { perps, spot };
+}
+
+async function buildRequestedCoinMatchers(rawCoins: string[]): Promise<{
+  raw: Set<string>;
+  normalized: Set<string>;
+}> {
+  const normalized = await Promise.all(
+    rawCoins.map(async (coin) => normalizeCoinParam(coin))
+  );
+  return {
+    raw: new Set(rawCoins.map((c) => c.toUpperCase())),
+    normalized: new Set(normalized.map((c) => c.toUpperCase())),
+  };
+}
+
+/**
+ * Retrieve trending markets grouped by perps and spot.
+ * - perps: from allDexsAssetCtxs WebSocket snapshot + per-dex meta symbol mapping
+ * - spot: from spotMetaAndAssetCtxs
+*/
+async function getTrendingCoins(
+  args: Record<string, unknown>,
+  _context?: { apiKey?: string; userId?: string }
+): Promise<string> {
+  const sorting = requireField(
+    args?.sorting,
+    trendingSortingSchema,
+    "sorting",
+    "Use sorting: volume or price_change."
+  ) ?? "volume";
+  const count = 10;
+
+  try {
+    const { perps, spot } = await fetchAllMarketContextRows();
+
+    const score = (row: { volume24hNotional: string; price24hChangePct: string }) =>
+      sorting === "price_change"
+        ? parseDecimal(row.price24hChangePct)
+        : parseDecimal(row.volume24hNotional);
+
+    const sortedPerps = [...perps].sort((a, b) => score(b) - score(a)).slice(0, count);
+    const sortedSpot = [...spot].sort((a, b) => score(b) - score(a)).slice(0, count);
+
+    return JSON.stringify(
+      {
+        sorting,
+        count,
+        perps: {
+          count: sortedPerps.length,
+          list: sortedPerps,
+        },
+        spot: {
+          count: sortedSpot.length,
+          list: sortedSpot,
+        },
+      },
+      null,
+      2
+    );
+  } catch (error) {
+    const errorMessage =
+      error instanceof Error ? error.message : String(error);
+    throw new Error(`Failed to retrieve trending coins: ${errorMessage}`);
+  }
+}
+
+/**
+ * Retrieve asset context rows for a specified list of coins/pairs.
+ * Accepts perps (e.g. BTC, dex:BTC) and spot pairs (e.g. HYPE/USDC).
+ */
+async function getAssetContext(
+  args: Record<string, unknown>,
+  _context?: { apiKey?: string; userId?: string }
+): Promise<string> {
+  const coins = requireField(
+    args?.coins,
+    coinsSchema,
+    "coins",
+    "Provide coins list (e.g. ['BTC', 'hyna:BTC', 'HYPE/USDC'])."
+  );
+
+  try {
+    const matcher = await buildRequestedCoinMatchers(coins);
+    const { perps, spot } = await fetchAllMarketContextRows();
+
+    const perpsFiltered = perps.filter((row) => {
+      const key = row.coin.toUpperCase();
+      return matcher.raw.has(key) || matcher.normalized.has(key);
+    });
+
+    const spotFiltered = spot.filter((row) => {
+      const key = row.coin.toUpperCase();
+      return matcher.raw.has(key) || matcher.normalized.has(key);
+    });
+
+    return JSON.stringify(
+      {
+        requestedCoins: coins,
+        perps: {
+          count: perpsFiltered.length,
+          list: perpsFiltered,
+        },
+        spot: {
+          count: spotFiltered.length,
+          list: spotFiltered,
+        },
+      },
+      null,
+      2
+    );
+  } catch (error) {
+    const errorMessage =
+      error instanceof Error ? error.message : String(error);
+    throw new Error(`Failed to retrieve asset context: ${errorMessage}`);
   }
 }
 
@@ -976,10 +1210,9 @@ export const hyperliquidApiTools: SdkToolDefinition[] = [
   {
     name: "get_coin_price",
     title: "Get Coin Price(s)",
-    description: "Retrieve market prices for one or more coins. Accepts `coin` (single) or `coins` (array).",
+    description: "Retrieve market prices for one or more coins from `coins`.",
     inputSchema: {
-      coin: coinSchema.optional(),
-      coins: coinsSchema.optional(),
+      coins: coinsSchema,
     },
     handler: async (args, _extra) => toContent(await getCoinPrice(args, getRequestContext())),
   },
@@ -1071,12 +1304,32 @@ export const hyperliquidApiTools: SdkToolDefinition[] = [
   {
     name: "search_markets",
     title: "Search Markets",
-    description: "Search available markets by query across perps (all dexs) and spot pairs.",
+    description: "Search available markets by query across perps and spot pairs.",
     inputSchema: {
       query: marketQuerySchema,
     },
     handler: async (args, _extra) =>
       toContent(await searchMarkets(args, getRequestContext())),
+  },
+  {
+    name: "get_trending_coins",
+    title: "Get Trending Coins",
+    description: "Retrieve top 10 trending perps and spot markets by volume or price_change.",
+    inputSchema: {
+      sorting: trendingSortingSchema,
+    },
+    handler: async (args, _extra) =>
+      toContent(await getTrendingCoins(args, getRequestContext())),
+  },
+  {
+    name: "get_asset_context",
+    title: "Get Asset Context",
+    description: "Retrieve market context for specified coins: includes 24h notional/base volume, 24h price change %, and other market context fields.",
+    inputSchema: {
+      coins: coinsSchema,
+    },
+    handler: async (args, _extra) =>
+      toContent(await getAssetContext(args, getRequestContext())),
   },
   {
     name: "get_pivot_highs_and_lows",
