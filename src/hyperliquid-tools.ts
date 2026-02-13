@@ -118,6 +118,17 @@ const trendingSortingSchema = z
 const userSchema = z.string().transform((s) => s.toLowerCase()).describe("The user's hyperliquid wallet address (e.g. 0x...).");
 const candleIntervalSchema = z.enum(["1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "8h", "12h", "1d", "3d", "1w", "1M"]).describe("Candle interval (Allowed: 1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 8h, 12h, 1d, 3d, 1w, 1M).");
 const candleCountSchema = z.number().int().min(1).max(MAX_CANDLE_COUNT).nullish();
+const orderbookSigFigsSchema = z
+  .union([z.literal(2), z.literal(3), z.literal(4), z.literal(5)])
+  .nullish()
+  .describe("Optional significant figures for aggregation (2, 3, 4, 5).");
+const orderbookDepthSchema = z
+  .number()
+  .int()
+  .min(1)
+  .max(50)
+  .nullish()
+  .describe("Optional number of bid/ask levels to return per side (1-50, default 20).");
 
 const indicatorNameSchema = z
   .enum(["rsi", "macd", "atr", "bollingerBands", "ema", "sma", "vwap"])
@@ -186,6 +197,90 @@ async function normalizeCoinParam(rawCoin: string): Promise<string> {
     );
   }
   return pairId;
+}
+
+/**
+ * Retrieve L2 order book snapshot for a market.
+ * Uses Hyperliquid SDK InfoClient l2Book.
+ */
+async function getOrderbook(
+  args: Record<string, unknown>,
+  _context?: { apiKey?: string; userId?: string }
+): Promise<string> {
+  const rawCoin = requireField(args?.coin, coinSchema, "coin", COIN_HINT);
+  const coin = await normalizeCoinParam(rawCoin);
+  const nSigFigs = requireField(
+    args?.nSigFigs,
+    orderbookSigFigsSchema,
+    "nSigFigs",
+    "Use nSigFigs as one of: 2, 3, 4, 5."
+  );
+  const depth =
+    requireField(
+      args?.depth,
+      orderbookDepthSchema,
+      "depth",
+      "Use depth between 1 and 50."
+    ) ?? 20;
+
+  try {
+    const data = await infoClient.l2Book({
+      coin,
+      ...(nSigFigs !== undefined && nSigFigs !== null ? { nSigFigs } : {}),
+    });
+
+    if (!data) {
+      return JSON.stringify(
+        {
+          coin: rawCoin,
+          message: "Market not found.",
+        },
+        null,
+        2
+      );
+    }
+
+    const bids = data.levels[0].slice(0, depth);
+    const asks = data.levels[1].slice(0, depth);
+
+    const bestBid = bids[0]?.px ?? null;
+    const bestAsk = asks[0]?.px ?? null;
+    const bestBidN =
+      bestBid !== null ? parseDecimal(bestBid) : null;
+    const bestAskN =
+      bestAsk !== null ? parseDecimal(bestAsk) : null;
+    const midPx =
+      bestBidN !== null && bestAskN !== null
+        ? formatDecimal((bestBidN + bestAskN) / 2)
+        : null;
+    const spread =
+      data.spread ??
+      (bestBidN !== null && bestAskN !== null
+        ? formatDecimal(bestAskN - bestBidN)
+        : null);
+
+    const output = {
+      coin: rawCoin,
+      summary: {
+        bestBid,
+        bestAsk,
+        midPx,
+        spread,
+        bidLevels: bids.length,
+        askLevels: asks.length,
+      },
+      levels: {
+        bids,
+        asks,
+      },
+    };
+
+    return JSON.stringify(output, null, 2);
+  } catch (error) {
+    const errorMessage =
+      error instanceof Error ? error.message : String(error);
+    throw new Error(`Failed to retrieve orderbook: ${errorMessage}`);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1208,15 +1303,6 @@ export async function getCandleSnapshotWithIndicators(
 // ---------------------------------------------------------------------------
 export const hyperliquidApiTools: SdkToolDefinition[] = [
   {
-    name: "get_coin_price",
-    title: "Get Coin Price(s)",
-    description: "Retrieve market prices for one or more coins from `coins`.",
-    inputSchema: {
-      coins: coinsSchema,
-    },
-    handler: async (args, _extra) => toContent(await getCoinPrice(args, getRequestContext())),
-  },
-  {
     name: "get_open_orders",
     title: "Get Open Orders",
     description: "Retrieve a user's open orders.",
@@ -1278,28 +1364,25 @@ export const hyperliquidApiTools: SdkToolDefinition[] = [
       toContent(await getActiveAssetData(args, getRequestContext())),
   },
   {
-    name: "get_market_data",
-    title: "Get Market Data",
-    description: "Retrieve last N candles (OHLCV) for a coin and interval, with optional indicators: RSI, MACD, ATR, Bollinger Bands, EMA, SMA, VWAP.",
+    name: "get_coin_price",
+    title: "Get Coin Price(s)",
+    description: "Retrieve market prices for one or more coins.",
+    inputSchema: {
+      coins: coinsSchema,
+    },
+    handler: async (args, _extra) => toContent(await getCoinPrice(args, getRequestContext())),
+  },
+  {
+    name: "get_orderbook",
+    title: "Get Orderbook",
+    description: "Retrieve orderbook snapshot (bids/asks) for a coin.",
     inputSchema: {
       coin: coinSchema,
-      interval: candleIntervalSchema,
-      count: candleCountSchema.describe(
-        `Optional number of candles to return (1 to ${MAX_CANDLE_COUNT}, default: ${DEFAULT_CANDLE_COUNT}).`
-      ),
-      indicators: indicatorsSchema,
-      rsiPeriod: rsiPeriodSchema,
-      macdFastPeriod: macdFastPeriodSchema,
-      macdSlowPeriod: macdSlowPeriodSchema,
-      macdSignalPeriod: macdSignalPeriodSchema,
-      atrPeriod: atrPeriodSchema,
-      bbPeriod: bbPeriodSchema,
-      bbStdDev: bbStdDevSchema,
-      emaPeriod: emaPeriodSchema,
-      smaPeriod: smaPeriodSchema,
+      nSigFigs: orderbookSigFigsSchema,
+      depth: orderbookDepthSchema,
     },
     handler: async (args, _extra) =>
-      toContent(await getCandleSnapshotWithIndicators(args, getRequestContext())),
+      toContent(await getOrderbook(args, getRequestContext())),
   },
   {
     name: "search_markets",
@@ -1341,5 +1424,29 @@ export const hyperliquidApiTools: SdkToolDefinition[] = [
     },
     handler: async (args, _extra) =>
       toContent(await getPivotHighsAndLows(args, getRequestContext())),
+  },
+  {
+    name: "get_market_data",
+    title: "Get Market Data",
+    description: "Retrieve last N candles (OHLCV) for a coin and interval, with optional indicators: RSI, MACD, ATR, Bollinger Bands, EMA, SMA, VWAP.",
+    inputSchema: {
+      coin: coinSchema,
+      interval: candleIntervalSchema,
+      count: candleCountSchema.describe(
+        `Optional number of candles to return (1 to ${MAX_CANDLE_COUNT}, default: ${DEFAULT_CANDLE_COUNT}).`
+      ),
+      indicators: indicatorsSchema,
+      rsiPeriod: rsiPeriodSchema,
+      macdFastPeriod: macdFastPeriodSchema,
+      macdSlowPeriod: macdSlowPeriodSchema,
+      macdSignalPeriod: macdSignalPeriodSchema,
+      atrPeriod: atrPeriodSchema,
+      bbPeriod: bbPeriodSchema,
+      bbStdDev: bbStdDevSchema,
+      emaPeriod: emaPeriodSchema,
+      smaPeriod: smaPeriodSchema,
+    },
+    handler: async (args, _extra) =>
+      toContent(await getCandleSnapshotWithIndicators(args, getRequestContext())),
   },
 ];
