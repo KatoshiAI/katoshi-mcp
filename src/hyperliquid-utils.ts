@@ -350,12 +350,13 @@ export function formatSpotSummary(
 ): {
   user: string;
   count: number;
-  list: Array<{ coin: string; total: string; inOrders: string }>;
+  list: Array<{ coin: string; total: string; inOrders: string; available: string }>;
 } {
   const balances = data.balances.map((b) => ({
     coin: b.coin,
     total: b.total,
     inOrders: b.hold,
+    available: formatDecimal(parseDecimal(b.total) - parseDecimal(b.hold)),
   }));
   const list = options?.nonZeroOnly
     ? balances.filter(
