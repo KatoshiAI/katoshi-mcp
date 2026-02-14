@@ -35,3 +35,17 @@ export interface SdkToolDefinition {
 export function toContent(text: string): CallToolResult {
   return { content: [{ type: "text", text }] };
 }
+
+/**
+ * Coerce numeric-like input to number for schema parsing and payload normalization.
+ * Accepts finite numbers and non-empty numeric strings (e.g. "10", "2.5").
+ * Returns original value when coercion is not possible.
+ */
+export function coerceNumberInput(value: unknown): unknown {
+  if (typeof value === "number") return value;
+  if (typeof value !== "string") return value;
+  const trimmed = value.trim();
+  if (trimmed === "") return value;
+  const parsed = Number(trimmed);
+  return Number.isFinite(parsed) ? parsed : value;
+}

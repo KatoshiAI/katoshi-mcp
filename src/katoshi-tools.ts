@@ -1,7 +1,11 @@
 import { z } from "zod";
 import { getRequestContext } from "./request-context.js";
 import { log } from "./utils.js";
-import { toContent, type SdkToolDefinition } from "./tool-common.js";
+import {
+  coerceNumberInput,
+  toContent,
+  type SdkToolDefinition,
+} from "./tool-common.js";
 
 /**
  * Katoshi Trading API tools
@@ -36,10 +40,12 @@ const TPSL_HINT = "Provide at least one of: sl_pct, tp_pct, sl, tp.";
 // ---------------------------------------------------------------------------
 // Schemas
 // ---------------------------------------------------------------------------
-const optionalNumber = (description: string) => z.number().nullish().describe(description);
+const numberLikeSchema = () => z.preprocess(coerceNumberInput, z.number());
+const intLikeSchema = () => z.preprocess(coerceNumberInput, z.number().int());
+const optionalNumber = (description: string) => numberLikeSchema().nullish().describe(description);
 const optionalBoolean = (description: string) => z.union([z.boolean(), z.null()]).optional().describe(description);
 const optionalStringArray = (description: string) => z.union([z.array(z.string()), z.null()]).optional().describe(description);
-const optionalIntArray = (description: string) => z.union([z.array(z.number().int()), z.null()]).optional().describe(description);
+const optionalIntArray = (description: string) => z.union([z.array(intLikeSchema()), z.null()]).optional().describe(description);
 
 const botIdSchema = z.union([z.number(), z.string()]).describe("The bot ID to execute the action for (number or string, e.g. 640 or '640'). Sent as integer to the API.");
 const coinSchema = z.string().describe("The coin symbol (e.g., 'BTC', 'ETH', 'SOL')");
@@ -49,14 +55,14 @@ const sizeSchema = optionalNumber("Size in contracts (e.g. 0.005). Provide exact
 const sizeUsdSchema = optionalNumber("Size in USD (e.g. 11). Provide exactly ONE of size, size_usd, or size_pct. Use null or omit for the other two. Do not send 0.");
 const sizePctSchema = optionalNumber("Size as fraction (e.g. 0.1 for 10%). Provide exactly ONE of size, size_usd, or size_pct. Use null or omit for the other two. Do not send 0.");
 const tpslSchemas = {
-  tp_pct: z.number().nullish().describe("Take-profit as % from entry (e.g. 0.02 for 2%). Use null or omit if user did not specify. Do not send 0."),
-  sl_pct: z.number().nullish().describe("Stop-loss as % from entry (e.g. 0.01 for 1%). Use null or omit if user did not specify. Do not send 0."),
-  tp: z.number().nullish().describe("Take-profit as price. Use null or omit if user did not specify. Do not send 0."),
-  sl: z.number().nullish().describe("Stop-loss as price. Use null or omit if user did not specify. Do not send 0."),
+  tp_pct: numberLikeSchema().nullish().describe("Take-profit as % from entry (e.g. 0.02 for 2%). Use null or omit if user did not specify. Do not send 0."),
+  sl_pct: numberLikeSchema().nullish().describe("Stop-loss as % from entry (e.g. 0.01 for 1%). Use null or omit if user did not specify. Do not send 0."),
+  tp: numberLikeSchema().nullish().describe("Take-profit as price. Use null or omit if user did not specify. Do not send 0."),
+  sl: numberLikeSchema().nullish().describe("Stop-loss as price. Use null or omit if user did not specify. Do not send 0."),
 };
-const slippagePctSchema = z.number().nullish().describe("Max slippage % (e.g. 0.05 for 5%). Use null or omit unless user specifies. Do not send 0.");
+const slippagePctSchema = numberLikeSchema().nullish().describe("Max slippage % (e.g. 0.05 for 5%). Use null or omit unless user specifies. Do not send 0.");
 const tpslTypeEnum = z.union([z.enum(["tpsl", "tp", "sl"]), z.null()]).optional().describe("Optional: 'tpsl' = both (default), 'tp' = take-profit only, 'sl' = stop-loss only. Use null or omit for default.");
-const requiredNumberSchema = z.union([z.number(), z.string()]).transform((v) => (typeof v === "string" ? Number(v) : v)).refine((n) => Number.isFinite(n), "must be a number");
+const requiredNumberSchema = numberLikeSchema();
 const orderIdSchema = z.union([z.number(), z.string()]).describe("Order ID (number or string).");
 const isCrossSchema = z.boolean().describe("true = cross margin, false = isolated.");
 const isAddSchema = z.boolean().describe("true = add margin, false = remove margin.");
@@ -86,7 +92,8 @@ function requireField<T>(
 
 /** Coerce to number only when value is a number; otherwise undefined (avoids sending 0/null by mistake). */
 function asNumber(v: unknown): number | undefined {
-  return typeof v === "number" ? v : undefined;
+  const n = coerceNumberInput(v);
+  return typeof n === "number" ? n : undefined;
 }
 
 /** Coerce to boolean only when value is a boolean; otherwise undefined (avoids sending 0/null by mistake). */
@@ -616,7 +623,7 @@ export const katoshiTradingTools: SdkToolDefinition[] = [
       coin: coinSchema,
       is_buy: isBuySchema,
       reduce_only: reduceOnlySchema,
-      price: z.number().describe("Limit price for the order."),
+      price: requiredNumberSchema.describe("Limit price for the order."),
       size: sizeSchema,
       size_usd: sizeUsdSchema,
       size_pct: sizePctSchema,
@@ -634,7 +641,7 @@ export const katoshiTradingTools: SdkToolDefinition[] = [
       coin: coinSchema,
       is_buy: isBuySchema,
       reduce_only: reduceOnlySchema,
-      price: z.number().describe("Trigger price for the stop."),
+      price: requiredNumberSchema.describe("Trigger price for the stop."),
       size: sizeSchema,
       size_usd: sizeUsdSchema,
       size_pct: sizePctSchema,
@@ -652,9 +659,9 @@ export const katoshiTradingTools: SdkToolDefinition[] = [
       coin: coinSchema,
       is_buy: isBuySchema,
       reduce_only: reduceOnlySchema,
-      start_price: z.number().describe("Price of first order (closest to current price)."),
-      end_price: z.number().describe("Price of last order."),
-      num_orders: z.number().describe("Number of limit orders."),
+      start_price: requiredNumberSchema.describe("Price of first order (closest to current price)."),
+      end_price: requiredNumberSchema.describe("Price of last order."),
+      num_orders: requiredNumberSchema.describe("Number of limit orders."),
       skew: optionalNumber("Size skew between first and last order (e.g. 2 = last 2x first). Use null or omit for default 1. Do not send 0."),
       size: sizeSchema,
       size_usd: sizeUsdSchema,
@@ -672,9 +679,9 @@ export const katoshiTradingTools: SdkToolDefinition[] = [
       bot_id: botIdSchema,
       coin: coinSchema,
       is_buy: isBuySchema,
-      price_start: z.number().describe("Start of grid price range."),
-      price_end: z.number().describe("End of grid price range."),
-      num_grids: z.number().describe("Number of grid orders to place."),
+      price_start: requiredNumberSchema.describe("Start of grid price range."),
+      price_end: requiredNumberSchema.describe("End of grid price range."),
+      num_grids: requiredNumberSchema.describe("Number of grid orders to place."),
       size: sizeSchema,
       size_usd: sizeUsdSchema,
       size_pct: sizePctSchema,
@@ -691,7 +698,7 @@ export const katoshiTradingTools: SdkToolDefinition[] = [
       bot_id: botIdSchema,
       coin: coinSchema,
       order_id: orderIdSchema,
-      price: z.number().describe("New price for the order."),
+      price: requiredNumberSchema.describe("New price for the order."),
     },
     handler: async (args, _extra) => toContent(await moveOrder(args, getRequestContext())),
   },
@@ -760,7 +767,7 @@ export const katoshiTradingTools: SdkToolDefinition[] = [
     inputSchema: {
       bot_id: botIdSchema,
       coin: coinSchema,
-      leverage: z.number().describe("Leverage multiplier (e.g., 5 for 5x)."),
+      leverage: requiredNumberSchema.describe("Leverage multiplier (e.g., 5 for 5x)."),
       is_cross: z.boolean().describe("true = Cross margin, false = Isolated margin."),
     },
     handler: async (args, _extra) => toContent(await setLeverage(args, getRequestContext())),
@@ -772,7 +779,7 @@ export const katoshiTradingTools: SdkToolDefinition[] = [
     inputSchema: {
       bot_id: botIdSchema,
       coin: coinSchema,
-      amount: z.number().describe("Amount in USD to add or remove (e.g., 5 for $5)."),
+      amount: requiredNumberSchema.describe("Amount in USD to add or remove (e.g., 5 for $5)."),
       is_add: z.boolean().describe("true = add margin, false = remove margin."),
     },
     handler: async (args, _extra) => toContent(await adjustMargin(args, getRequestContext())),

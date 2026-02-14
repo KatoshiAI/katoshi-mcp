@@ -15,7 +15,11 @@ import { ATR, BollingerBands, EMA, MACD, OBV, RSI, SMA, VWAP } from "technicalin
 // Utils: AverageGain, AverageLoss, SD, Highest, Lowest, Sum, CrossUp, CrossDown, Fibonacci
 import { z } from "zod";
 import { getRequestContext } from "./request-context.js";
-import { toContent, type SdkToolDefinition } from "./tool-common.js";
+import {
+  coerceNumberInput,
+  toContent,
+  type SdkToolDefinition,
+} from "./tool-common.js";
 import {
   computePivots,
   formatDecimal,
@@ -95,16 +99,17 @@ const DEFAULT_SMA_PERIOD = 20;
 // ---------------------------------------------------------------------------
 
 const coinSchema = z.string().describe("Asset symbol (e.g. BTC, ETH).");
+const intRangeSchema = (min: number, max: number) =>
+  z.preprocess(coerceNumberInput, z.number().int().min(min).max(max));
+const numberRangeSchema = (min: number, max: number) =>
+  z.preprocess(coerceNumberInput, z.number().min(min).max(max));
 const coinsSchema = z
   .array(coinSchema)
   .min(1)
   .max(50)
   .describe("List of asset symbols (or dex-prefixed symbols like dex:BTC).");
 const tradeHistoryLimitSchema = z
-  .number()
-  .int()
-  .min(1)
-  .max(50)
+  .preprocess(coerceNumberInput, z.number().int().min(1).max(50))
   .nullish()
   .describe("Maximum number of most recent fills to return (1-50, default 10).");
 const marketQuerySchema = z
@@ -118,16 +123,13 @@ const trendingSortingSchema = z
   .describe("Trending sorting: volume (24h notional) or price_change (24h % change). Default: volume.");
 const userSchema = z.string().transform((s) => s.toLowerCase()).describe("The user's hyperliquid wallet address (e.g. 0x...).");
 const candleIntervalSchema = z.enum(["1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "8h", "12h", "1d", "3d", "1w", "1M"]).describe("Candle interval (Allowed: 1m, 3m, 5m, 15m, 30m, 1h, 2h, 4h, 8h, 12h, 1d, 3d, 1w, 1M).");
-const candleCountSchema = z.number().int().min(1).max(MAX_CANDLE_COUNT).nullish();
+const candleCountSchema = intRangeSchema(1, MAX_CANDLE_COUNT).nullish();
 const orderbookSigFigsSchema = z
-  .union([z.literal(2), z.literal(3), z.literal(4), z.literal(5)])
+  .preprocess(coerceNumberInput, z.union([z.literal(2), z.literal(3), z.literal(4), z.literal(5)]))
   .nullish()
   .describe("Optional significant figures for aggregation (2, 3, 4, 5).");
 const orderbookDepthSchema = z
-  .number()
-  .int()
-  .min(1)
-  .max(50)
+  .preprocess(coerceNumberInput, z.number().int().min(1).max(50))
   .nullish()
   .describe("Optional number of bid/ask levels to return per side (1-50, default 20).");
 
@@ -141,16 +143,16 @@ const indicatorsSchema = z
   .optional()
   .describe("Optional list of indicators to compute (rsi, macd, atr, bollingerBands, ema, sma, vwap, obv).");
 
-const rsiPeriodSchema = z.number().int().min(2).max(30).nullish().describe("RSI period (default 14).");
-const rsiSmaLengthSchema = z.number().int().min(2).max(50).nullish().describe("RSI SMA length (default 14).");
-const macdFastPeriodSchema = z.number().int().min(2).max(20).nullish().describe("MACD fast period (default 12).");
-const macdSlowPeriodSchema = z.number().int().min(5).max(50).nullish().describe("MACD slow period (default 26).");
-const macdSignalPeriodSchema = z.number().int().min(2).max(20).nullish().describe("MACD signal period (default 9).");
-const atrPeriodSchema = z.number().int().min(2).max(30).nullish().describe("ATR period (default 14).");
-const bbPeriodSchema = z.number().int().min(2).max(50).nullish().describe("Bollinger Bands period (default 20).");
-const bbStdDevSchema = z.number().min(1).max(3).nullish().describe("Bollinger Bands standard deviations (default 2).");
-const emaPeriodSchema = z.number().int().min(2).max(200).nullish().describe("EMA period (default 20, max 200).");
-const smaPeriodSchema = z.number().int().min(2).max(200).nullish().describe("SMA period (default 20, max 200).");
+const rsiPeriodSchema = intRangeSchema(2, 30).nullish().describe("RSI period (default 14).");
+const rsiSmaLengthSchema = intRangeSchema(2, 50).nullish().describe("RSI SMA length (default 14).");
+const macdFastPeriodSchema = intRangeSchema(2, 20).nullish().describe("MACD fast period (default 12).");
+const macdSlowPeriodSchema = intRangeSchema(5, 50).nullish().describe("MACD slow period (default 26).");
+const macdSignalPeriodSchema = intRangeSchema(2, 20).nullish().describe("MACD signal period (default 9).");
+const atrPeriodSchema = intRangeSchema(2, 30).nullish().describe("ATR period (default 14).");
+const bbPeriodSchema = intRangeSchema(2, 50).nullish().describe("Bollinger Bands period (default 20).");
+const bbStdDevSchema = numberRangeSchema(1, 3).nullish().describe("Bollinger Bands standard deviations (default 2).");
+const emaPeriodSchema = intRangeSchema(2, 200).nullish().describe("EMA period (default 20, max 200).");
+const smaPeriodSchema = intRangeSchema(2, 200).nullish().describe("SMA period (default 20, max 200).");
 
 let spotPairIdMapPromise: Promise<Map<string, string>> | null = null;
 
@@ -991,25 +993,79 @@ export async function getCandleSnapshotWithIndicators(
     "interval",
     INTERVAL_HINT
   );
-  const countParsed = candleCountSchema.safeParse(args?.count);
-  const count = countParsed.success
-    ? Math.min(MAX_CANDLE_COUNT, Math.max(1, countParsed.data ?? DEFAULT_CANDLE_COUNT))
-    : DEFAULT_CANDLE_COUNT;
-  const indicatorsParsed = indicatorsSchema.safeParse(args?.indicators);
-  const indicators = indicatorsParsed.success && indicatorsParsed.data?.length
-    ? indicatorsParsed.data
-    : null;
+  const count = requireField(
+    args?.count,
+    candleCountSchema,
+    "count",
+    `Use count between 1 and ${MAX_CANDLE_COUNT}.`
+  ) ?? DEFAULT_CANDLE_COUNT;
+  const indicators = requireField(
+    args?.indicators,
+    indicatorsSchema,
+    "indicators",
+    "Use indicators from: rsi, macd, atr, bollingerBands, ema, sma, vwap, obv."
+  ) ?? null;
 
-  const rsiPeriod = Math.min(30, Math.max(2, Number(args?.rsiPeriod) || DEFAULT_RSI_PERIOD));
-  const rsiSmaLength = Math.min(50, Math.max(2, Number(args?.rsiSmaLength) || DEFAULT_RSI_SMA_LENGTH));
-  const macdFast = Math.min(20, Math.max(2, Number(args?.macdFastPeriod) || DEFAULT_MACD_FAST));
-  const macdSlow = Math.min(50, Math.max(5, Number(args?.macdSlowPeriod) || DEFAULT_MACD_SLOW));
-  const macdSignal = Math.min(20, Math.max(2, Number(args?.macdSignalPeriod) || DEFAULT_MACD_SIGNAL));
-  const atrPeriod = Math.min(30, Math.max(2, Number(args?.atrPeriod) || DEFAULT_ATR_PERIOD));
-  const bbPeriod = Math.min(50, Math.max(2, Number(args?.bbPeriod) || DEFAULT_BB_PERIOD));
-  const bbStdDev = Math.min(3, Math.max(1, Number(args?.bbStdDev) || DEFAULT_BB_STDDEV));
-  const emaPeriod = Math.min(200, Math.max(2, Number(args?.emaPeriod) || DEFAULT_EMA_PERIOD));
-  const smaPeriod = Math.min(200, Math.max(2, Number(args?.smaPeriod) || DEFAULT_SMA_PERIOD));
+  const rsiPeriod = requireField(
+    args?.rsiPeriod,
+    rsiPeriodSchema,
+    "rsiPeriod",
+    "Use rsiPeriod between 2 and 30."
+  ) ?? DEFAULT_RSI_PERIOD;
+  const rsiSmaLength = requireField(
+    args?.rsiSmaLength,
+    rsiSmaLengthSchema,
+    "rsiSmaLength",
+    "Use rsiSmaLength between 2 and 50."
+  ) ?? DEFAULT_RSI_SMA_LENGTH;
+  const macdFast = requireField(
+    args?.macdFastPeriod,
+    macdFastPeriodSchema,
+    "macdFastPeriod",
+    "Use macdFastPeriod between 2 and 20."
+  ) ?? DEFAULT_MACD_FAST;
+  const macdSlow = requireField(
+    args?.macdSlowPeriod,
+    macdSlowPeriodSchema,
+    "macdSlowPeriod",
+    "Use macdSlowPeriod between 5 and 50."
+  ) ?? DEFAULT_MACD_SLOW;
+  const macdSignal = requireField(
+    args?.macdSignalPeriod,
+    macdSignalPeriodSchema,
+    "macdSignalPeriod",
+    "Use macdSignalPeriod between 2 and 20."
+  ) ?? DEFAULT_MACD_SIGNAL;
+  const atrPeriod = requireField(
+    args?.atrPeriod,
+    atrPeriodSchema,
+    "atrPeriod",
+    "Use atrPeriod between 2 and 30."
+  ) ?? DEFAULT_ATR_PERIOD;
+  const bbPeriod = requireField(
+    args?.bbPeriod,
+    bbPeriodSchema,
+    "bbPeriod",
+    "Use bbPeriod between 2 and 50."
+  ) ?? DEFAULT_BB_PERIOD;
+  const bbStdDev = requireField(
+    args?.bbStdDev,
+    bbStdDevSchema,
+    "bbStdDev",
+    "Use bbStdDev between 1 and 3."
+  ) ?? DEFAULT_BB_STDDEV;
+  const emaPeriod = requireField(
+    args?.emaPeriod,
+    emaPeriodSchema,
+    "emaPeriod",
+    "Use emaPeriod between 2 and 200."
+  ) ?? DEFAULT_EMA_PERIOD;
+  const smaPeriod = requireField(
+    args?.smaPeriod,
+    smaPeriodSchema,
+    "smaPeriod",
+    "Use smaPeriod between 2 and 200."
+  ) ?? DEFAULT_SMA_PERIOD;
 
   const lookback = getRequiredIndicatorLookback(indicators ?? null, {
     rsiPeriod,
