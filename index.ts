@@ -150,6 +150,10 @@ function serve(req: IncomingMessage, res: ServerResponse): void {
       const queryApiKey = extractApiKeyFromQuery(normalized.queryStringParameters);
       const token = headerToken || queryApiKey;
       const userId = normalized.queryStringParameters?.id ?? undefined;
+      const frontendApiKey =
+        normalized.headers["x-frontend-api-key"] ||
+        normalized.headers["X-Frontend-Api-Key"] ||
+        undefined;
 
       if (!token) {
         const reqId =
@@ -188,7 +192,7 @@ function serve(req: IncomingMessage, res: ServerResponse): void {
       });
 
       runWithContextAsync(
-        { apiKey: token, userId: userId ?? undefined },
+        { apiKey: token, userId: userId ?? undefined, frontendApiKey },
         async () => {
           await server.connect(transport);
           await transport.handleRequest(req, res, parsedBody);

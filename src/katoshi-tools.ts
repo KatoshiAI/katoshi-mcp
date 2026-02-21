@@ -155,11 +155,12 @@ function normalizeArgs(args: Record<string, unknown>): Record<string, unknown> {
 async function executeAction(
   action: string,
   args: Record<string, unknown>,
-  context?: { apiKey?: string; userId?: string }
+  context?: { apiKey?: string; userId?: string; frontendApiKey?: string }
 ): Promise<string> {
   const startTime = Date.now();
   const apiKey = context?.apiKey;
   const userId = context?.userId;
+  const frontendApiKey = context?.frontendApiKey;
   const argsNorm = normalizeArgs(args);
 
   if (!KATOSHI_API_BASE_URL) {
@@ -259,11 +260,17 @@ async function executeAction(
   if (numGrids !== undefined) payload.num_grids = numGrids;
 
   const apiUrl = `${KATOSHI_API_BASE_URL}?id=${encodeURIComponent(userId)}`;
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+  };
+  if (frontendApiKey) {
+    headers["X-Frontend-Api-Key"] = frontendApiKey;
+  }
 
   try {
     const response = await fetch(apiUrl, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers,
       body: JSON.stringify(payload),
     });
 
@@ -338,7 +345,7 @@ function requireSize(args: Record<string, unknown>): void {
 
 async function openPosition(
   args: Record<string, unknown>,
-  context?: { apiKey?: string; userId?: string }
+  context?: { apiKey?: string; userId?: string; frontendApiKey?: string }
 ): Promise<string> {
   const a = normalizeArgs(args);
   requireField(a.bot_id, botIdSchema, "bot_id", BOT_ID_HINT);
@@ -350,7 +357,7 @@ async function openPosition(
 
 async function closePosition(
   args: Record<string, unknown>,
-  context?: { apiKey?: string; userId?: string }
+  context?: { apiKey?: string; userId?: string; frontendApiKey?: string }
 ): Promise<string> {
   const a = normalizeArgs(args);
   requireField(a.bot_id, botIdSchema, "bot_id", BOT_ID_HINT);
@@ -361,7 +368,7 @@ async function closePosition(
 
 async function marketOrder(
   args: Record<string, unknown>,
-  context?: { apiKey?: string; userId?: string }
+  context?: { apiKey?: string; userId?: string; frontendApiKey?: string }
 ): Promise<string> {
   const a = normalizeArgs(args);
   requireField(a.bot_id, botIdSchema, "bot_id", BOT_ID_HINT);
@@ -374,7 +381,7 @@ async function marketOrder(
 
 async function limitOrder(
   args: Record<string, unknown>,
-  context?: { apiKey?: string; userId?: string }
+  context?: { apiKey?: string; userId?: string; frontendApiKey?: string }
 ): Promise<string> {
   const a = normalizeArgs(args);
   requireField(a.bot_id, botIdSchema, "bot_id", BOT_ID_HINT);
@@ -388,7 +395,7 @@ async function limitOrder(
 
 async function stopMarketOrder(
   args: Record<string, unknown>,
-  context?: { apiKey?: string; userId?: string }
+  context?: { apiKey?: string; userId?: string; frontendApiKey?: string }
 ): Promise<string> {
   const a = normalizeArgs(args);
   requireField(a.bot_id, botIdSchema, "bot_id", BOT_ID_HINT);
@@ -402,7 +409,7 @@ async function stopMarketOrder(
 
 async function scaleOrder(
   args: Record<string, unknown>,
-  context?: { apiKey?: string; userId?: string }
+  context?: { apiKey?: string; userId?: string; frontendApiKey?: string }
 ): Promise<string> {
   const a = normalizeArgs(args);
   requireField(a.bot_id, botIdSchema, "bot_id", BOT_ID_HINT);
@@ -418,7 +425,7 @@ async function scaleOrder(
 
 async function gridOrder(
   args: Record<string, unknown>,
-  context?: { apiKey?: string; userId?: string }
+  context?: { apiKey?: string; userId?: string; frontendApiKey?: string }
 ): Promise<string> {
   const a = normalizeArgs(args);
   requireField(a.bot_id, botIdSchema, "bot_id", BOT_ID_HINT);
@@ -433,7 +440,7 @@ async function gridOrder(
 
 async function moveOrder(
   args: Record<string, unknown>,
-  context?: { apiKey?: string; userId?: string }
+  context?: { apiKey?: string; userId?: string; frontendApiKey?: string }
 ): Promise<string> {
   const a = normalizeArgs(args);
   requireField(a.bot_id, botIdSchema, "bot_id", BOT_ID_HINT);
@@ -445,7 +452,7 @@ async function moveOrder(
 
 async function cancelOrder(
   args: Record<string, unknown>,
-  context?: { apiKey?: string; userId?: string }
+  context?: { apiKey?: string; userId?: string; frontendApiKey?: string }
 ): Promise<string> {
   const a = normalizeArgs(args);
   requireField(a.bot_id, botIdSchema, "bot_id", BOT_ID_HINT);
@@ -455,7 +462,7 @@ async function cancelOrder(
 
 async function closeAll(
   args: Record<string, unknown>,
-  context?: { apiKey?: string; userId?: string }
+  context?: { apiKey?: string; userId?: string; frontendApiKey?: string }
 ): Promise<string> {
   const a = normalizeArgs(args);
   requireField(a.bot_id, botIdSchema, "bot_id", BOT_ID_HINT);
@@ -464,7 +471,7 @@ async function closeAll(
 
 async function sellAll(
   args: Record<string, unknown>,
-  context?: { apiKey?: string; userId?: string }
+  context?: { apiKey?: string; userId?: string; frontendApiKey?: string }
 ): Promise<string> {
   const a = normalizeArgs(args);
   requireField(a.bot_id, botIdSchema, "bot_id", BOT_ID_HINT);
@@ -473,7 +480,7 @@ async function sellAll(
 
 async function clearAll(
   args: Record<string, unknown>,
-  context?: { apiKey?: string; userId?: string }
+  context?: { apiKey?: string; userId?: string; frontendApiKey?: string }
 ): Promise<string> {
   const a = normalizeArgs(args);
   requireField(a.bot_id, botIdSchema, "bot_id", BOT_ID_HINT);
@@ -482,7 +489,7 @@ async function clearAll(
 
 async function cancelAll(
   args: Record<string, unknown>,
-  context?: { apiKey?: string; userId?: string }
+  context?: { apiKey?: string; userId?: string; frontendApiKey?: string }
 ): Promise<string> {
   const a = normalizeArgs(args);
   requireField(a.bot_id, botIdSchema, "bot_id", BOT_ID_HINT);
@@ -491,7 +498,7 @@ async function cancelAll(
 
 async function setLeverage(
   args: Record<string, unknown>,
-  context?: { apiKey?: string; userId?: string }
+  context?: { apiKey?: string; userId?: string; frontendApiKey?: string }
 ): Promise<string> {
   const a = normalizeArgs(args);
   requireField(a.bot_id, botIdSchema, "bot_id", BOT_ID_HINT);
@@ -503,7 +510,7 @@ async function setLeverage(
 
 async function adjustMargin(
   args: Record<string, unknown>,
-  context?: { apiKey?: string; userId?: string }
+  context?: { apiKey?: string; userId?: string; frontendApiKey?: string }
 ): Promise<string> {
   const a = normalizeArgs(args);
   requireField(a.bot_id, botIdSchema, "bot_id", BOT_ID_HINT);
@@ -515,7 +522,7 @@ async function adjustMargin(
 
 async function startBot(
   args: Record<string, unknown>,
-  context?: { apiKey?: string; userId?: string }
+  context?: { apiKey?: string; userId?: string; frontendApiKey?: string }
 ): Promise<string> {
   const a = normalizeArgs(args);
   requireField(a.bot_id, botIdSchema, "bot_id", BOT_ID_HINT);
@@ -524,7 +531,7 @@ async function startBot(
 
 async function stopBot(
   args: Record<string, unknown>,
-  context?: { apiKey?: string; userId?: string }
+  context?: { apiKey?: string; userId?: string; frontendApiKey?: string }
 ): Promise<string> {
   const a = normalizeArgs(args);
   requireField(a.bot_id, botIdSchema, "bot_id", BOT_ID_HINT);
@@ -533,7 +540,7 @@ async function stopBot(
 
 async function modifyTpsl(
   args: Record<string, unknown>,
-  context?: { apiKey?: string; userId?: string }
+  context?: { apiKey?: string; userId?: string; frontendApiKey?: string }
 ): Promise<string> {
   const a = normalizeArgs(args);
   requireField(a.bot_id, botIdSchema, "bot_id", BOT_ID_HINT);
@@ -551,7 +558,7 @@ async function modifyTpsl(
 
 async function cancelTpsl(
   args: Record<string, unknown>,
-  context?: { apiKey?: string; userId?: string }
+  context?: { apiKey?: string; userId?: string; frontendApiKey?: string }
 ): Promise<string> {
   const a = normalizeArgs(args);
   requireField(a.bot_id, botIdSchema, "bot_id", BOT_ID_HINT);

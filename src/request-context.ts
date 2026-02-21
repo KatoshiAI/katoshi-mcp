@@ -3,6 +3,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 export interface RequestContext {
   apiKey?: string;
   userId?: string;
+  frontendApiKey?: string;
 }
 
 const requestContextStorage = new AsyncLocalStorage<RequestContext>();
