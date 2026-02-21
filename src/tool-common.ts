@@ -49,3 +49,30 @@ export function coerceNumberInput(value: unknown): unknown {
   const parsed = Number(trimmed);
   return Number.isFinite(parsed) ? parsed : value;
 }
+
+/**
+ * Coerce array-like input for tolerant agent calls.
+ * Accepts actual arrays, JSON-stringified arrays, comma-separated strings, and single values.
+ */
+export function coerceArrayInput(value: unknown): unknown {
+  if (Array.isArray(value) || value === null || value === undefined) return value;
+  if (typeof value !== "string") return value;
+
+  const trimmed = value.trim();
+  if (trimmed === "") return value;
+  if (trimmed.toLowerCase() === "null") return null;
+
+  try {
+    const parsed = JSON.parse(trimmed);
+    if (Array.isArray(parsed) || parsed === null) return parsed;
+  } catch {
+    // Fall through to relaxed parsing.
+  }
+
+  if (trimmed.includes(",")) {
+    const values = trimmed.split(",").map((v) => v.trim()).filter(Boolean);
+    return values.length > 0 ? values : value;
+  }
+
+  return [trimmed];
+}

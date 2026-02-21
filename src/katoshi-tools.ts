@@ -2,6 +2,7 @@ import { z } from "zod";
 import { getRequestContext } from "./request-context.js";
 import { log } from "./utils.js";
 import {
+  coerceArrayInput,
   coerceNumberInput,
   toContent,
   type SdkToolDefinition,
@@ -44,8 +45,10 @@ const numberLikeSchema = () => z.preprocess(coerceNumberInput, z.number());
 const intLikeSchema = () => z.preprocess(coerceNumberInput, z.number().int());
 const optionalNumber = (description: string) => numberLikeSchema().nullish().describe(description);
 const optionalBoolean = (description: string) => z.union([z.boolean(), z.null()]).optional().describe(description);
-const optionalStringArray = (description: string) => z.union([z.array(z.string()), z.null()]).optional().describe(description);
-const optionalIntArray = (description: string) => z.union([z.array(intLikeSchema()), z.null()]).optional().describe(description);
+const optionalStringArray = (description: string) =>
+  z.preprocess(coerceArrayInput, z.union([z.array(z.string()), z.null()])).optional().describe(description);
+const optionalIntArray = (description: string) =>
+  z.preprocess(coerceArrayInput, z.union([z.array(intLikeSchema()), z.null()])).optional().describe(description);
 
 const botIdSchema = z.union([z.number(), z.string()]).describe("The bot ID to execute the action for (number or string, e.g. 640 or '640'). Sent as integer to the API.");
 const coinSchema = z.string().describe("The coin symbol (e.g., 'BTC', 'ETH', 'SOL')");
@@ -103,15 +106,19 @@ function asBoolean(v: unknown): boolean | undefined {
 
 /** Coerce to string[] only when value is an array of strings; otherwise undefined (avoids sending null/empty by mistake). */
 function asStringArray(v: unknown): string[] | undefined {
-  if (!Array.isArray(v)) return undefined;
-  const out = v.filter((x): x is string => typeof x === "string");
+  const arrayInput = coerceArrayInput(v);
+  if (!Array.isArray(arrayInput)) return undefined;
+  const out = arrayInput.filter((x): x is string => typeof x === "string");
   return out.length > 0 ? out : undefined;
 }
 
 /** Coerce to number[] (integers) only when value is an array of numbers; otherwise undefined (avoids sending null/empty by mistake). */
 function asIntArray(v: unknown): number[] | undefined {
-  if (!Array.isArray(v)) return undefined;
-  const out = v.map((x) => (typeof x === "number" && Number.isInteger(x) ? x : Math.trunc(Number(x)))).filter((n) => !Number.isNaN(n));
+  const arrayInput = coerceArrayInput(v);
+  if (!Array.isArray(arrayInput)) return undefined;
+  const out = arrayInput
+    .map((x) => (typeof x === "number" && Number.isInteger(x) ? x : Math.trunc(Number(x))))
+    .filter((n) => !Number.isNaN(n));
   return out.length > 0 ? out : undefined;
 }
 

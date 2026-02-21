@@ -16,6 +16,7 @@ import { ATR, BollingerBands, EMA, MACD, OBV, RSI, SMA, VWAP } from "technicalin
 import { z } from "zod";
 import { getRequestContext } from "./request-context.js";
 import {
+  coerceArrayInput,
   coerceNumberInput,
   toContent,
   type SdkToolDefinition,
@@ -103,11 +104,14 @@ const intRangeSchema = (min: number, max: number) =>
   z.preprocess(coerceNumberInput, z.number().int().min(min).max(max));
 const numberRangeSchema = (min: number, max: number) =>
   z.preprocess(coerceNumberInput, z.number().min(min).max(max));
-const coinsSchema = z
-  .array(coinSchema)
-  .min(1)
-  .max(50)
-  .describe("List of asset symbols (or dex-prefixed symbols like dex:BTC).");
+const coinsSchema = z.preprocess(
+  coerceArrayInput,
+  z
+    .array(coinSchema)
+    .min(1)
+    .max(50)
+    .describe("List of asset symbols (or dex-prefixed symbols like dex:BTC).")
+);
 const tradeHistoryLimitSchema = z
   .preprocess(coerceNumberInput, z.number().int().min(1).max(50))
   .nullish()
@@ -136,12 +140,15 @@ const orderbookDepthSchema = z
 const indicatorNameSchema = z
   .enum(["rsi", "macd", "atr", "bollingerBands", "ema", "sma", "vwap", "obv"])
   .describe("Indicator: rsi, macd, atr, bollingerBands, ema, sma, vwap, obv");
-const indicatorsSchema = z
-  .array(indicatorNameSchema)
-  .min(1)
-  .max(8)
-  .optional()
-  .describe("Optional list of indicators to compute (rsi, macd, atr, bollingerBands, ema, sma, vwap, obv).");
+const indicatorsSchema = z.preprocess(
+  coerceArrayInput,
+  z
+    .array(indicatorNameSchema)
+    .min(1)
+    .max(8)
+    .optional()
+    .describe("Optional list of indicators to compute (rsi, macd, atr, bollingerBands, ema, sma, vwap, obv).")
+);
 
 const rsiPeriodSchema = intRangeSchema(2, 30).nullish().describe("RSI period (default 14).");
 const rsiSmaLengthSchema = intRangeSchema(2, 50).nullish().describe("RSI SMA length (default 14).");
