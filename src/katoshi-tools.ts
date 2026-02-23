@@ -99,6 +99,13 @@ function asNumber(v: unknown): number | undefined {
   return typeof n === "number" ? n : undefined;
 }
 
+/** Coerce to integer only when value is numeric; otherwise undefined. */
+function asInt(v: unknown): number | undefined {
+  if (v === undefined || v === null) return undefined;
+  const n = Number(v);
+  return Number.isFinite(n) ? Math.trunc(n) : undefined;
+}
+
 /** Coerce to boolean only when value is a boolean; otherwise undefined (avoids sending 0/null by mistake). */
 function asBoolean(v: unknown): boolean | undefined {
   return typeof v === "boolean" ? v : undefined;
@@ -244,7 +251,8 @@ async function executeAction(
   if (amount !== undefined) payload.amount = amount;
   const isAdd = asBoolean(argsNorm.is_add);
   if (isAdd !== undefined) payload.is_add = isAdd;
-  setIfValid(payload, "order_id", argsNorm.order_id);
+  const orderId = asInt(argsNorm.order_id);
+  if (orderId !== undefined) payload.order_id = orderId;
   const orderIds = asIntArray(argsNorm.order_ids);
   if (orderIds !== undefined) payload.order_ids = orderIds;
   const dexs = asStringArray(argsNorm.dexs);
