@@ -66,7 +66,7 @@ const tpslSchemas = {
 const slippagePctSchema = numberLikeSchema().nullish().describe("Max slippage % (e.g. 0.05 for 5%). Use null or omit unless user specifies. Do not send 0.");
 const tpslTypeEnum = z.union([z.enum(["tpsl", "tp", "sl"]), z.null()]).optional().describe("Optional: 'tpsl' = both (default), 'tp' = take-profit only, 'sl' = stop-loss only. Use null or omit for default.");
 const requiredNumberSchema = numberLikeSchema();
-const orderIdSchema = z.union([z.number(), z.string()]).describe("Order ID (number or string).");
+const orderIdSchema = intLikeSchema().describe("Order ID (integer; numeric strings are accepted and coerced).");
 const isCrossSchema = z.boolean().describe("true = cross margin, false = isolated.");
 const isAddSchema = z.boolean().describe("true = add margin, false = remove margin.");
 
