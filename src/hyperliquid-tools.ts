@@ -144,9 +144,8 @@ const indicatorsSchema = z.preprocess(
   coerceArrayInput,
   z
     .array(indicatorNameSchema)
-    .min(1)
     .max(8)
-    .optional()
+    .nullish()
     .describe("Optional list of indicators to compute (rsi, macd, atr, bollingerBands, ema, sma, vwap, obv).")
 );
 
